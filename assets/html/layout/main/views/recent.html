@@ -1,0 +1,19 @@
+    <div x-show="connected && !loading && activeView==='recent'" class="p-4" x-cloak>
+      <h2 class="text-lg font-semibold mb-4" x-text="aiLanguage === 'en' ? 'Recently Added Items' : 'Son Eklenen Öğeler'"></h2>
+      <div class="relative pl-6">
+        <div class="timeline-line"></div>
+        <template x-for="item in recentItems" :key="item.key">
+          <div @click="selectItem(item); activeView='items'" class="timeline-item relative mb-4 cursor-pointer fade-in">
+            <div class="card card-hover p-3 transition">
+              <div class="flex items-start justify-between">
+                <div class="min-w-0 flex-1">
+                  <h4 class="text-sm font-medium" x-text="item.data.title || (aiLanguage === 'en' ? 'Untitled' : 'Başlıksız')"></h4>
+                  <p class="text-xs text-slate-400 mt-0.5" x-text="formatAuthors(item.data.creators)"></p>
+                </div>
+                <span class="text-[10px] text-slate-500 shrink-0 ml-2" x-text="formatDate(item.data.dateAdded)"></span>
+              </div>
+            </div>
+          </div>
+        </template>
+      </div>
+    </div>

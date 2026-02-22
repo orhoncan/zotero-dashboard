@@ -1,0 +1,38 @@
+<div
+  x-show="selfCheckOpen"
+  x-cloak
+  x-transition.opacity.duration.180ms
+  class="fixed bottom-3 right-3 z-50 w-[min(26rem,calc(100vw-1.5rem))] pointer-events-none">
+  <div class="pointer-events-auto card p-2.5 shadow-2xl">
+    <div class="flex items-center justify-between gap-2 mb-2">
+      <div class="text-[11px] font-semibold text-slate-200" x-text="aiLanguage === 'en' ? 'Startup Self-Check' : 'Açılış Self-Check'"></div>
+      <div class="flex items-center gap-1">
+        <button
+          @click="runStartupSelfCheck(true)"
+          :disabled="selfCheckLoading"
+          class="text-[10px] px-2 py-1 rounded-md border border-slate-600 bg-slate-800 hover:bg-slate-700 transition disabled:opacity-40"
+          x-text="selfCheckLoading ? (aiLanguage === 'en' ? 'Checking...' : 'Kontrol ediliyor...') : (aiLanguage === 'en' ? 'Refresh' : 'Yenile')"></button>
+        <button
+          @click="selfCheckOpen = false"
+          class="w-6 h-6 flex items-center justify-center rounded-md border border-slate-600 bg-slate-800 hover:bg-slate-700 transition"
+          :title="aiLanguage === 'en' ? 'Hide panel' : 'Paneli gizle'">
+          <svg class="w-3.5 h-3.5 text-slate-300" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <path d="m6 6 12 12M18 6 6 18"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+    <div class="grid grid-cols-1 gap-1.5 max-h-72 overflow-y-auto pr-0.5">
+      <template x-for="key in orderedSelfCheckRows()" :key="`self-check-${key}`">
+        <div class="rounded-md border border-slate-700/50 bg-slate-800/50 px-2.5 py-2">
+          <div class="flex items-center justify-between gap-2">
+            <span class="text-[11px] text-slate-200" x-text="selfCheckRowLabel(key)"></span>
+            <span class="text-[10px] font-medium" :class="selfCheckStatusClass(selfCheck[key]?.status)" x-text="selfCheckStatusLabel(selfCheck[key]?.status)"></span>
+          </div>
+          <div class="mt-1 text-[10px] text-slate-400 break-words" x-text="selfCheck[key]?.detail || '-'"></div>
+        </div>
+      </template>
+    </div>
+    <div x-show="selfCheckError" class="mt-2 text-[10px] text-red-300 bg-red-500/10 border border-red-500/30 rounded-md px-2 py-1.5" x-text="selfCheckError"></div>
+  </div>
+</div>

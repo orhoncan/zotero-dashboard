@@ -1,0 +1,173 @@
+        <div x-show="detailTab==='chat'" class="flex-1 min-h-0 flex flex-col overflow-hidden fade-in">
+          <!-- Quick prompts -->
+          <div class="p-3 border-b border-slate-700/50 shrink-0">
+            <div class="mb-2">
+              <span class="text-[10px] text-slate-500 uppercase tracking-wide" x-text="aiLanguage === 'en' ? 'AI Settings' : 'AI Ayarları'"></span>
+		              <div class="mt-1 grid grid-cols-2 gap-1.5 items-center">
+                <div class="flex items-center gap-1.5 min-w-0">
+                  <span class="text-[10px] text-slate-500 shrink-0" x-text="aiLanguage === 'en' ? 'Provider' : 'Sağlayıcı'"></span>
+                  <select x-model="aiProvider" @change="onAiProviderChange()"
+                    class="w-full bg-slate-800 border border-slate-600 rounded-md text-[11px] px-2 py-1 text-slate-300 focus:outline-none focus:border-red-500">
+                    <option value="claude">Claude</option>
+                    <option value="codex">Codex</option>
+                    <option value="gemini">Gemini</option>
+                  </select>
+                </div>
+                <div class="flex items-center gap-1.5 min-w-0">
+                  <span class="text-[10px] text-slate-500 shrink-0" x-text="aiLanguage === 'en' ? 'Model' : 'Model'"></span>
+                  <select x-model="aiModel" @change="onAiModelChange()"
+                    class="w-full bg-slate-800 border border-slate-600 rounded-md text-[11px] px-2 py-1 text-slate-300 focus:outline-none focus:border-red-500">
+                    <template x-for="opt in modelOptions()" :key="`${aiProvider}-${opt.value || 'default'}`">
+                      <option :value="opt.value" x-text="opt.label"></option>
+                    </template>
+		                  </select>
+		                </div>
+		              </div>
+		              <div class="mt-1 flex items-center gap-1.5 min-w-0">
+		                <span class="text-[10px] text-slate-500 shrink-0" x-text="aiLanguage === 'en' ? 'Mode' : 'Mod'"></span>
+		                <select x-model="aiAnalysisMode" @change="onAiAnalysisModeChange()"
+		                  class="w-full bg-slate-800 border border-slate-600 rounded-md text-[11px] px-2 py-1 text-slate-300 focus:outline-none focus:border-red-500">
+	                  <template x-for="opt in analysisModeOptions()" :key="`analysis-mode-${opt.value}`">
+	                    <option :value="opt.value" x-text="opt.label"></option>
+		                  </template>
+		                </select>
+		              </div>
+		              <div class="mt-1 text-[10px] flex items-center justify-between gap-2">
+		                <span
+		                  class="truncate"
+		                  :class="providerHealthStatusClass(aiProvider)"
+		                  :title="providerHealthFor(aiProvider).lastError || ''"
+		                  x-text="(aiLanguage === 'en' ? 'Health: ' : 'Sağlık: ') + providerHealthStatusLabel(aiProvider) + (providerHealthFor(aiProvider).cooldownSec ? (aiLanguage === 'en' ? ` (${providerHealthFor(aiProvider).cooldownSec}s cooldown)` : ` (${providerHealthFor(aiProvider).cooldownSec}s bekleme)`) : (providerHealthFor(aiProvider).latencyMs ? ` (${providerHealthFor(aiProvider).latencyMs}ms)` : ''))"></span>
+		                <span
+		                  class="text-slate-500 truncate"
+		                  :title="fallbackChainLabel(aiProvider)"
+		                  x-text="(aiLanguage === 'en' ? 'Fallback: ' : 'Fallback: ') + fallbackChainLabel(aiProvider)"></span>
+		              </div>
+		            </div>
+	            <div class="grid grid-cols-2 gap-1.5">
+              <button @click="sendClaude('summarize')" :disabled="chatLoading"
+                class="text-xs bg-slate-800 hover:bg-slate-700 border border-slate-600 hover:border-red-500/40 rounded-lg px-2 py-1.5 transition disabled:opacity-50 text-left"
+                x-text="quickPromptButtonLabel('summarize')"></button>
+              <button @click="sendClaude('notes')" :disabled="chatLoading"
+                class="text-xs bg-slate-800 hover:bg-slate-700 border border-slate-600 hover:border-red-500/40 rounded-lg px-2 py-1.5 transition disabled:opacity-50 text-left"
+                x-text="quickPromptButtonLabel('notes')"></button>
+              <button @click="sendClaude('related')" :disabled="chatLoading"
+                class="text-xs bg-slate-800 hover:bg-slate-700 border border-slate-600 hover:border-red-500/40 rounded-lg px-2 py-1.5 transition disabled:opacity-50 text-left"
+                x-text="quickPromptButtonLabel('related')"></button>
+              <button @click="sendClaude('critique')" :disabled="chatLoading"
+                class="text-xs bg-slate-800 hover:bg-slate-700 border border-slate-600 hover:border-red-500/40 rounded-lg px-2 py-1.5 transition disabled:opacity-50 text-left"
+                x-text="quickPromptButtonLabel('critique')"></button>
+            </div>
+          </div>
+          <!-- Chat Messages -->
+          <div x-ref="chatScroll" class="flex-1 min-h-0 overflow-y-auto p-3 space-y-3">
+            <template x-if="chatMessages.length === 0 && !chatLoading">
+              <div class="text-center py-8">
+                <p class="text-xs text-slate-500" x-text="aiLanguage === 'en' ? 'Use the quick actions above or ask a question.' : 'Yukarıdaki hızlı butonları kullanın veya soru sorun.'"></p>
+                <button
+                  @click="sendClaude('summarize')"
+                  class="mt-2 text-[11px] px-2.5 py-1.5 rounded-md border border-slate-600 bg-slate-800 hover:bg-slate-700 transition"
+                  x-text="aiLanguage === 'en' ? 'Create quick summary' : 'Hızlı özet oluştur'"></button>
+              </div>
+            </template>
+            <template x-for="(msg, i) in chatMessages" :key="i">
+              <div class="fade-in">
+                <div x-show="msg.role==='user'" class="flex justify-end">
+                  <div class="bg-red-500/20 border border-red-500/30 rounded-lg px-3 py-2 max-w-[90%] text-xs text-slate-200" x-text="msg.display || msg.content"></div>
+                </div>
+                <div x-show="msg.role==='assistant'" class="flex justify-start">
+                  <div class="bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 max-w-[95%] text-xs text-slate-200 chat-md" x-html="renderMd(msg.content)"></div>
+                </div>
+              </div>
+            </template>
+            <div x-show="chatLoading" class="flex items-center gap-2 text-xs text-slate-400">
+              <svg class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+              <span x-text="aiProviderLabel + (aiLanguage === 'en' ? ' is thinking...' : ' düşünüyor...')"></span>
+            </div>
+          </div>
+	          <!-- Chat Input -->
+	          <div class="p-3 border-t border-slate-700/50 shrink-0">
+	            <div class="flex gap-2">
+	              <button
+	                @click="clearChatMessages()"
+	                :disabled="chatLoading || (!chatMessages.length && !chatError)"
+	                :title="aiLanguage === 'en' ? 'Clear chat' : 'Sohbeti temizle'"
+	                :aria-label="aiLanguage === 'en' ? 'Clear chat' : 'Sohbeti temizle'"
+	                class="w-9 h-9 flex items-center justify-center rounded-lg border border-slate-600 bg-slate-800 text-slate-200 hover:bg-slate-700 transition shrink-0 disabled:opacity-30">
+	                <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+	                  <path d="M3 6h18"/>
+	                  <path d="M8 6V4h8v2"/>
+	                  <path d="M7 6l1 14h8l1-14"/>
+	                </svg>
+	              </button>
+	              <input x-ref="chatInput" type="text" x-model="chatInput" @keydown.enter="sendChatMessage()"
+	                :placeholder="aiLanguage === 'en' ? 'Ask a question...' : 'Soru sor...'" :disabled="chatLoading"
+	                class="flex-1 bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-red-500 transition placeholder-slate-500 disabled:opacity-50">
+              <button
+                @click="chatLoading ? stopChatRequest() : sendChatMessage()"
+                :disabled="!chatLoading && !chatInput.trim()"
+                :title="chatLoading ? (aiLanguage === 'en' ? 'Stop request' : 'İsteği durdur') : (aiLanguage === 'en' ? 'Send message' : 'Mesaj gönder')"
+                :aria-label="chatLoading ? (aiLanguage === 'en' ? 'Stop request' : 'İsteği durdur') : (aiLanguage === 'en' ? 'Send message' : 'Mesaj gönder')"
+                class="w-9 h-9 flex items-center justify-center rounded-lg border transition shrink-0 disabled:opacity-30"
+                :class="chatLoading ? 'border-amber-500/50 bg-amber-500/20 text-amber-200 hover:bg-amber-500/30' : 'accent-bg border-red-600 text-white hover:bg-red-700'">
+                <svg x-show="!chatLoading" class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24">
+                  <path d="M5 12h12"/>
+                  <path d="m13 6 6 6-6 6"/>
+                </svg>
+                <svg x-show="chatLoading" class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24">
+                  <rect x="6" y="6" width="12" height="12" rx="1.5"/>
+                </svg>
+              </button>
+            </div>
+            <div x-show="chatError" class="mt-1.5 text-[10px] text-red-400" x-text="chatError"></div>
+          </div>
+          <!-- Note editor (collapsible, bottom) -->
+          <div class="border-t border-slate-700/50 shrink-0">
+            <button @click="noteEditorOpen = !noteEditorOpen" class="w-full flex items-center justify-between px-3 py-2 text-left hover:bg-slate-800/40 transition">
+              <span class="text-[10px] text-slate-500 uppercase tracking-wide" x-text="aiLanguage === 'en' ? 'Note Editor' : 'Not Editörü'"></span>
+              <svg class="w-3.5 h-3.5 text-slate-400 transition-transform" :class="noteEditorOpen ? 'rotate-180' : ''" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                <path d="m6 9 6 6 6-6"/>
+              </svg>
+            </button>
+            <div x-show="noteEditorOpen" x-transition class="px-3 pb-2 overflow-y-auto" style="max-height:min(34vh,18rem)">
+              <div class="flex items-center justify-end mb-1.5">
+                <button @click="loadLastAssistantToEditor()" :disabled="chatLoading || chatMessages.length===0"
+                  class="text-[10px] px-2 py-1 rounded-md border border-slate-600 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 transition">
+                  <span x-text="aiLanguage === 'en' ? 'Insert last response' : 'Son yanıtı al'"></span>
+                </button>
+              </div>
+              <textarea
+                x-ref="noteEditor"
+                x-model="noteEditorContent"
+                @input="persistChatForCurrentItem()"
+                :placeholder="aiLanguage === 'en' ? 'You can edit AI output here.' : 'AI çıktısını burada düzenleyebilirsiniz.'"
+                class="w-full h-[clamp(6rem,16vh,14rem)] min-h-[6rem] bg-slate-800 border border-slate-600 rounded-md text-xs px-2 py-2 text-slate-200 focus:outline-none focus:border-red-500 placeholder-slate-500 resize-y"></textarea>
+              <div class="mt-1.5 flex items-center justify-between gap-2 text-[10px] text-slate-500">
+                <span
+                  class="truncate"
+                  :title="obsidianDirectory || obsidianActiveDirectory || ''"
+                  x-text="(aiLanguage === 'en' ? 'Obsidian folder: ' : 'Obsidian klasörü: ') + (obsidianDirectory || obsidianActiveDirectory || (aiLanguage === 'en' ? 'Not set' : 'Ayarlanmadı'))"></span>
+                <button
+                  @click="changeObsidianFolder()"
+                  :disabled="savingNoteToObsidian"
+                  :title="aiLanguage === 'en' ? 'Change Obsidian folder' : 'Obsidian klasörünü değiştir'"
+                  :aria-label="aiLanguage === 'en' ? 'Change Obsidian folder' : 'Obsidian klasörünü değiştir'"
+                  class="w-7 h-6 flex items-center justify-center rounded-md border border-violet-500/40 bg-violet-500/10 hover:bg-violet-500/20 disabled:opacity-40 transition">
+                  <svg class="w-3.5 h-3.5 text-violet-300" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                    <path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/>
+                  </svg>
+                </button>
+              </div>
+              <div class="flex items-center justify-end mt-1.5 gap-2 flex-wrap">
+                <button @click="syncEditorToObsidian()" :disabled="savingNoteToObsidian || !noteEditorContent.trim()"
+                  class="text-[10px] px-2 py-1 rounded-md border border-violet-500/35 bg-violet-500/10 hover:bg-violet-500/20 disabled:opacity-40 transition">
+                  <span x-text="savingNoteToObsidian ? (aiLanguage === 'en' ? 'Syncing...' : 'Senkronize ediliyor...') : (aiLanguage === 'en' ? 'Sync to Obsidian' : 'Obsidian’a Senkronize Et')"></span>
+                </button>
+                <button @click="saveEditorToZotero()" :disabled="savingNoteToZotero || !noteEditorContent.trim()"
+                  class="text-[10px] px-2.5 py-1 rounded-md border border-red-700 accent-bg hover:bg-red-700 text-white disabled:opacity-40 transition">
+                  <span x-text="savingNoteToZotero ? (aiLanguage === 'en' ? 'Saving...' : 'Kaydediliyor...') : (aiLanguage === 'en' ? 'Sync to Zotero' : 'Zotero’ya Senkronize Et')"></span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
