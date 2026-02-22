@@ -4,8 +4,10 @@ _Orhon'un Zotero Paneli, Zotero kütüphanenizi web arayüzünden koleksiyon, ö
 
 **Orhon's Zotero Dashboard lets you manage your Zotero library from a web interface at the collection, item, PDF, note, and tag level. It also uses Claude/Codex/Gemini CLI with zotero-mcp to generate fast AI analysis and sync results to both Zotero and Obsidian.**
 
+- [Türkçe ayrıntılı rehber (X)](https://x.com/orhoncand/status/2025583007562596379)
 - Türkçe rehber: [README_TR.md](README_TR.md)
 - English guide: [README_EN.md](README_EN.md)
+
 
 # Screenshots
 
