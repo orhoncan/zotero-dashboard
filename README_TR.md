@@ -2,10 +2,9 @@
 
 Bu proje, Zotero kütüphanenizi web arayüzünden yönetmenizi sağlayan bir paneldir.
 
-Kısa özet:
 - Zotero öğelerini ve koleksiyonlarını listeler.
 - PDF görüntüler, not/annotation gösterir.
-- AI analiz (Claude/Codex/Gemini CLI) yapar.
+- AI analiz (Claude/Codex/Gemini CLI) yapar. **En az bir tanesi yüklü olmalı, giriş yapmış olmanız gerekli. API şart değil.**
 - AI çıktısını düzenleyip Zotero notu olarak kaydeder.
 - AI notlarını Obsidian klasörüne senkronize eder.
 - Zotero erişimi için `zotero-mcp` kullanır. (https://github.com/kujenga/zotero-mcp)
@@ -33,7 +32,7 @@ Orhon'un Zotero Paneli ile:
   - Gemini CLI
 
 Not:
-- Üçü birden zorunlu değildir, en az bir AI CLI yeterlidir.
+- Üçü birden zorunlu değildir, en az bir AI CLI yeterlidir. Başlangıçta kontrol edip devam etmesi için yeterli.
 - Arayüzde self-check paneli hangi araçların çalıştığını gösterir.
 
 ## İsteğe bağlı
