@@ -8,7 +8,7 @@ Kısa özet:
 - AI analiz (Claude/Codex/Gemini CLI) yapar.
 - AI çıktısını düzenleyip Zotero notu olarak kaydeder.
 - AI notlarını Obsidian klasörüne senkronize eder.
-- Zotero erişimi için `zotero-mcp` kullanır.
+- Zotero erişimi için `zotero-mcp` kullanır. (https://github.com/kujenga/zotero-mcp)
 
 ## 1. Bu uygulama ne yapar?
 
