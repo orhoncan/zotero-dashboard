@@ -7,7 +7,7 @@ Bu proje, Zotero kütüphanenizi web arayüzünden yönetmenizi sağlayan bir pa
 - AI analiz (Claude/Codex/Gemini CLI) yapar. **En az bir tanesi yüklü olmalı, giriş yapmış olmanız gerekli. API şart değil.**
 - AI çıktısını düzenleyip Zotero notu olarak kaydeder.
 - AI notlarını Obsidian klasörüne senkronize eder.
-- Zotero erişimi için `zotero-mcp` kullanır. (https://github.com/kujenga/zotero-mcp)
+- Zotero erişimi için `zotero-mcp` kullanır. (https://github.com/kujenga/zotero-mcp) **Aksi takdirde çıktı kalitesi düşer.**
 
 ## 1. Bu uygulama ne yapar?
 
@@ -96,15 +96,15 @@ py -3 serve.py
 6. Tarayıcıda açın:
 - [http://localhost:8080](http://localhost:8080)
 
-## 5. İlk kullanım (çok temel)
+## 5. İlk kullanım (temel)
 
 1. Sol panelden bir koleksiyon veya öğe seçin.
 2. Sağ panelde:
    - `Detay` sekmesinde metadata, özet, etiketler görünür.
-   - `AI Analiz` sekmesinde sağlayıcı/model seçilir.
+   - `AI Analiz` sekmesinde sağlayıcı/model seçilir. **Burada dosya büyüklüğüne göre çıktı 1 dakikaya kadar uzayabilir. Daha küçük dosyalar/flash modeller daha hızlı dönüş yapar ama kalitesi de daha düşük olacaktır.**
 3. Hızlı butonlardan birine basın (`Özetle`, `Notları Analiz Et` vb.).
 4. Yanıt gelince not editöründe metin birikir.
-5. İsterseniz:
+5. İsterseniz senkronizasyon mümkündür:
    - `Zotero'ya Senkronize Et`
    - `Obsidian'a Senkronize Et`
 
@@ -128,7 +128,7 @@ Komutlar otomatik bulunmazsa ortam değişkeni tanımlayabilirsiniz:
 ## 8. Sık karşılaşılan sorunlar
 
 ## "Zotero'ya Bağlanılamadı"
-- Zotero Desktop açık mı kontrol edin.
+- Zotero Desktop açık mı kontrol edin. **Ayarlarda ağ erişimi de (diğer uygulamaların Zotero'yla iletişim kurmasına izin ver) açık olmalıdır.**
 - Uygulamayı `python3 serve.py` / `py -3 serve.py` ile tekrar başlatın.
 
 ## "CLI bulunamadı"
