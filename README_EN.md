@@ -8,7 +8,7 @@ Quick summary:
 - Runs AI analysis via CLI tools (Claude/Codex/Gemini).
 - Lets you edit AI output and sync it back to Zotero notes.
 - Syncs AI notes to an Obsidian folder.
-- Uses `zotero-mcp` for Zotero tool access.
+- Uses `zotero-mcp` for Zotero tool access. (https://github.com/kujenga/zotero-mcp)
 
 ## 1. What does this app do?
 
