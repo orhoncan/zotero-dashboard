@@ -1,0 +1,20 @@
+# macOS
+.DS_Store
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Local tool/config artifacts
+.gemini/
+.mcp-zotero.json
+.obsidian-config.json
+
+# Release artifacts
+*.zip
+orhons-zotero-dashboard/
+
+# Optional env files
+.env
+.env.*
+!.env.example
