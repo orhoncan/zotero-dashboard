@@ -39,7 +39,9 @@
         }
 
         const selected = this.selectedCompareKeys
-          .map((key) => this.items.find((i) => i.key === key))
+          .map((key) => (typeof this.findItemByKey === 'function'
+            ? this.findItemByKey(key)
+            : this.items.find((i) => i.key === key)))
           .filter(Boolean);
         const supportsMcp = typeof this.providerSupportsMcp === 'function'
           ? this.providerSupportsMcp()

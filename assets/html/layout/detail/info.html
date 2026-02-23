@@ -148,7 +148,7 @@
               (<span x-text="itemNotes.length"></span>)
             </h4>
             <template x-for="note in itemNotes" :key="note.key">
-              <div class="bg-slate-800/50 rounded-lg p-2 mb-1.5 text-xs text-slate-300 leading-relaxed max-h-32 overflow-y-auto" x-html="note.data.note"></div>
+              <div class="bg-slate-800/50 rounded-lg p-2 mb-1.5 text-xs text-slate-300 leading-relaxed max-h-32 overflow-y-auto" x-html="renderNoteHtml(note.data.note)"></div>
             </template>
           </div>
 

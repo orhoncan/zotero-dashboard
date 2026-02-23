@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "zotero-mcp": {
+      "command": "/Users/orhon/.local/bin/zotero-mcp",
+      "args": [],
+      "env": {}
+    }
+  }
+}

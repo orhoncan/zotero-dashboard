@@ -22,8 +22,15 @@
       compareChatActive: false,
       compareChatKeys: [],
       detailTab: 'info',
+      aiContextKeys: [],
 
       items: [],
+      itemCacheByKey: {},
+      _itemsVersion: 0,
+      _displayItemsMemoKey: '',
+      _displayItemsMemoRows: [],
+      _visibleItemsAbortController: null,
+      _visibleItemsRequestSeq: 0,
       collections: [],
       allTags: [],
       topTags: [],
@@ -42,10 +49,26 @@
       theme: 'dark',
       allItemsCount: 0,
       _keyboardBound: false,
+      detailPanelWidth: 380,
+      detailPanelMinWidth: 320,
+      detailPanelMaxWidth: 760,
+      _detailPanelResizeHandler: null,
 
       pdfUrl: null,
       pdfTitle: '',
       pdfPanelHeight: 45,
+      pdfUseIframeFallback: false,
+      pdfViewerReady: false,
+      pdfViewerError: '',
+      pdfViewerScale: 1.1,
+      pdfPageCount: 0,
+      pdfCurrentPage: 1,
+      pdfPageNumbers: [],
+      pdfRenderedPages: {},
+      pdfSearchQuery: '',
+      pdfSearchResults: [],
+      pdfSearchActiveIndex: -1,
+      pdfSearchBusy: false,
       pdfAnnotations: [],
       pdfAnnotationsUpdatedAt: 0,
       showPdfAnnotations: true,
@@ -55,6 +78,16 @@
       activePdfAttachmentKey: null,
       activePdfZoteroUrl: '',
       _pdfAnnotationRefreshTimer: null,
+      _pdfLoadToken: 0,
+      _pdfLoadingTask: null,
+      _pdfDocument: null,
+      _pdfRenderTasks: {},
+      _pdfRenderJobs: {},
+      _pdfRenderEpoch: 0,
+      _pdfIntersectionObserver: null,
+      _pdfScrollRaf: 0,
+      _pdfSearchToken: 0,
+      _pdfPageTextCache: {},
 
       chatMessages: [],
       chatInput: '',
@@ -62,10 +95,12 @@
       chatAbortController: null,
       chatError: '',
       chatCache: {},
+      _chatCacheWarned: false,
       noteEditorContent: '',
       savingNoteToZotero: false,
       savingNoteToObsidian: false,
-      noteEditorOpen: true,
+      noteEditorOpen: false,
+      contextPanelOpen: false,
       metadataEditorOpen: false,
       metadataSaving: false,
       editAbstract: '',
@@ -78,6 +113,8 @@
       aiProvider: 'claude',
       aiModel: '',
       aiAnalysisMode: 'balanced',
+      pipelineTemplate: 'study',
+      pipelineChunkLimit: 'auto',
       aiLanguage: 'tr',
       aiProviders: [
         { value: 'claude', label: 'Claude' },
@@ -129,6 +166,20 @@
       },
 
       get displayItems() {
+        const normalizedLocalFilter = this.normalizeText(this.localFilterQuery.trim());
+        const cacheKey = [
+          this._itemsVersion,
+          this.selectedTag || '',
+          this.selectedItemType || 'all',
+          this.sortBy || 'dateAdded-desc',
+          normalizedLocalFilter,
+          this.localeCode,
+        ].join('|');
+
+        if (cacheKey === this._displayItemsMemoKey && Array.isArray(this._displayItemsMemoRows)) {
+          return this._displayItemsMemoRows;
+        }
+
         let result = this.items.filter((i) => this.isPrimaryLibraryItem(i));
 
         if (this.selectedTag) {
@@ -139,8 +190,7 @@
           result = result.filter((i) => i.data.itemType === this.selectedItemType);
         }
 
-        if (this.localFilterQuery.trim()) {
-          const q = this.normalizeText(this.localFilterQuery.trim());
+        if (normalizedLocalFilter) {
           result = result.filter((i) => {
             const data = i.data;
             const haystack = [
@@ -150,7 +200,7 @@
               this.extractYear(data.date) || '',
               (data.tags || []).map((t) => t.tag).join(' '),
             ].join(' ');
-            return this.normalizeText(haystack).includes(q);
+            return this.normalizeText(haystack).includes(normalizedLocalFilter);
           });
         }
 
@@ -175,6 +225,8 @@
           return multiplier * (a.data.dateAdded || '').localeCompare(b.data.dateAdded || '');
         });
 
+        this._displayItemsMemoKey = cacheKey;
+        this._displayItemsMemoRows = result;
         return result;
       },
 
@@ -293,6 +345,105 @@
         this.listDensity = nextDensity;
         this.currentPage = 1;
         this.persistListDensityPreference();
+      },
+
+      detailPanelWidthStorageKey() {
+        return 'zotero-detail-panel-width';
+      },
+
+      dynamicDetailPanelMaxWidth() {
+        const min = Number(this.detailPanelMinWidth || 320);
+        const configuredMax = Number(this.detailPanelMaxWidth || 760);
+        const viewportCap = Math.max(min + 40, window.innerWidth - 280);
+        return Math.max(min, Math.min(configuredMax, viewportCap));
+      },
+
+      clampDetailPanelWidth(nextWidth) {
+        const min = Number(this.detailPanelMinWidth || 320);
+        const max = this.dynamicDetailPanelMaxWidth();
+        const value = Number.isFinite(Number(nextWidth)) ? Math.round(Number(nextWidth)) : min;
+        return Math.max(min, Math.min(max, value));
+      },
+
+      syncDetailPanelWidthToViewport(persist = false) {
+        const clamped = this.clampDetailPanelWidth(this.detailPanelWidth);
+        if (clamped === this.detailPanelWidth) return;
+        this.detailPanelWidth = clamped;
+        if (persist) {
+          this.persistDetailPanelWidthPreference();
+        }
+      },
+
+      bindDetailPanelViewportSync() {
+        if (this._detailPanelResizeHandler) return;
+        this._detailPanelResizeHandler = () => {
+          this.syncDetailPanelWidthToViewport(true);
+        };
+        window.addEventListener('resize', this._detailPanelResizeHandler, { passive: true });
+      },
+
+      loadDetailPanelWidthPreference() {
+        try {
+          const raw = localStorage.getItem(this.detailPanelWidthStorageKey());
+          if (raw !== null) {
+            this.detailPanelWidth = this.clampDetailPanelWidth(parseInt(raw, 10));
+            this.syncDetailPanelWidthToViewport(false);
+            return;
+          }
+        } catch (e) {
+          // no-op
+        }
+        this.detailPanelWidth = this.clampDetailPanelWidth(this.detailPanelWidth);
+        this.syncDetailPanelWidthToViewport(false);
+      },
+
+      persistDetailPanelWidthPreference() {
+        try {
+          localStorage.setItem(this.detailPanelWidthStorageKey(), String(this.clampDetailPanelWidth(this.detailPanelWidth)));
+        } catch (e) {
+          // no-op
+        }
+      },
+
+      startDetailPanelResize(e) {
+        if ((e?.button ?? 0) !== 0) return;
+        if (e?.preventDefault) e.preventDefault();
+
+        const startX = e.clientX;
+        const startWidth = this.detailPanelWidth;
+        document.body.classList.add('detail-resizing');
+
+        const onWindowBlur = () => {
+          onUp();
+        };
+        const onVisibilityChange = () => {
+          if (document.visibilityState === 'hidden') {
+            onUp();
+          }
+        };
+
+        const onMove = (ev) => {
+          if ((ev.buttons & 1) === 0) {
+            onUp();
+            return;
+          }
+          const delta = startX - ev.clientX;
+          this.detailPanelWidth = this.clampDetailPanelWidth(startWidth + delta);
+        };
+
+        const onUp = () => {
+          document.removeEventListener('mousemove', onMove);
+          document.removeEventListener('mouseup', onUp);
+          window.removeEventListener('blur', onWindowBlur);
+          document.removeEventListener('visibilitychange', onVisibilityChange);
+          document.body.classList.remove('detail-resizing');
+          this.persistDetailPanelWidthPreference();
+        };
+
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+        window.addEventListener('blur', onWindowBlur);
+        document.addEventListener('visibilitychange', onVisibilityChange);
       },
     };
 

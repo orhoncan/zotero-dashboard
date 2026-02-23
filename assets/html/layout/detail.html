@@ -1,5 +1,18 @@
-  <aside class="detail-panel min-h-0 border-l border-slate-700/50 flex flex-col overflow-hidden" x-show="selectedItem" x-cloak>
-    <div data-partial="/assets/html/layout/detail/tabbar.html"></div>
-    <div data-partial="/assets/html/layout/detail/selected.html"></div>
-    <div data-partial="/assets/html/layout/detail/empty.html"></div>
+  <aside
+    class="detail-panel min-h-0 border-l border-slate-700/50 flex flex-col overflow-hidden"
+    x-show="selectedItem"
+    :style="'width:' + detailPanelWidth + 'px;min-width:' + detailPanelWidth + 'px'"
+    x-cloak>
+    <button
+      @mousedown.prevent.stop="startDetailPanelResize($event)"
+      class="detail-panel-resizer"
+      :title="aiLanguage === 'en' ? 'Resize right panel' : 'Sağ paneli yeniden boyutlandır'"
+      :aria-label="aiLanguage === 'en' ? 'Resize right panel' : 'Sağ paneli yeniden boyutlandır'">
+      <span class="detail-panel-resizer-line"></span>
+    </button>
+    <div class="flex-1 min-h-0 flex flex-col overflow-hidden">
+      <div data-partial="/assets/html/layout/detail/tabbar.html"></div>
+      <div data-partial="/assets/html/layout/detail/selected.html"></div>
+      <div data-partial="/assets/html/layout/detail/empty.html"></div>
+    </div>
   </aside>

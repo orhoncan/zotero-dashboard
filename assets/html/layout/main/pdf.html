@@ -20,7 +20,7 @@
             @mousedown.stop
             @click.stop="openPdfInZoteroReader()"
             class="h-7 text-slate-300 hover:text-white transition text-[10px] border border-slate-600 rounded-md px-2 inline-flex items-center gap-1"
-            :title="aiLanguage === 'en' ? 'Open in Zotero Reader (highlight/annotate sync)' : 'Zotero Reader’da aç (altını çiz/not al, senkronize)'" >
+            :title="aiLanguage === 'en' ? 'Open in Zotero Reader (highlight/annotate sync)' : 'Zotero Reader’da aç (altını çiz/not al, senkronize)'">
             <svg class="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
               <path d="M14 3h7v7"/>
               <path d="M10 14 21 3"/>
@@ -28,13 +28,16 @@
             </svg>
             <span class="hidden sm:inline" x-text="aiLanguage === 'en' ? 'Open in Zotero' : 'Zotero’da Aç'"></span>
           </button>
-          <button x-show="pdfAnnotations.length" @mousedown.stop @click.stop="showPdfAnnotations = !showPdfAnnotations"
+          <button
+            x-show="pdfAnnotations.length || pdfSearchResults.length"
+            @mousedown.stop
+            @click.stop="showPdfAnnotations = !showPdfAnnotations"
             class="h-7 text-slate-400 hover:text-white transition text-[10px] border border-slate-600 rounded-md px-2 inline-flex items-center gap-1"
-            :title="showPdfAnnotations ? (aiLanguage === 'en' ? 'Hide annotation panel' : 'Not panelini gizle') : (aiLanguage === 'en' ? 'Show annotation panel' : 'Not panelini göster')">
+            :title="showPdfAnnotations ? (aiLanguage === 'en' ? 'Hide side panel' : 'Yan paneli gizle') : (aiLanguage === 'en' ? 'Show side panel' : 'Yan paneli göster')">
             <svg class="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" stroke-width="1.9" viewBox="0 0 24 24">
               <path d="M4 5h16v12H7l-3 3V5z"/>
             </svg>
-            <span x-text="(aiLanguage === 'en' ? 'Notes ' : 'Notlar ') + pdfAnnotations.length"></span>
+            <span x-text="aiLanguage === 'en' ? 'Panel' : 'Panel'"></span>
           </button>
           <button
             @mousedown.stop
@@ -62,23 +65,124 @@
           </button>
         </div>
       </div>
-      <div class="flex-1 min-h-0 flex overflow-hidden">
-        <div class="flex-1 min-w-0 h-full overflow-hidden">
-          <iframe :src="pdfUrl" class="flex-1 w-full h-full bg-white block"></iframe>
+
+      <div class="px-3 py-1.5 border-b border-slate-700/70 flex items-center gap-2 text-[11px] shrink-0 overflow-hidden">
+        <div class="flex items-center gap-1 shrink-0">
+          <button
+            @click="prevPdfPage()"
+            :disabled="!pdfPageCount || pdfCurrentPage <= 1"
+            class="w-7 h-7 inline-flex items-center justify-center rounded-md border border-slate-600 bg-slate-800 hover:bg-slate-700 disabled:opacity-35 transition"
+            :title="aiLanguage === 'en' ? 'Previous page' : 'Önceki sayfa'">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="m15 6-6 6 6 6"/></svg>
+          </button>
+          <span class="text-slate-300 min-w-[6.5rem] text-center" x-text="pdfPageCount ? `${pdfCurrentPage}/${pdfPageCount}` : '-'"></span>
+          <button
+            @click="nextPdfPage()"
+            :disabled="!pdfPageCount || pdfCurrentPage >= pdfPageCount"
+            class="w-7 h-7 inline-flex items-center justify-center rounded-md border border-slate-600 bg-slate-800 hover:bg-slate-700 disabled:opacity-35 transition"
+            :title="aiLanguage === 'en' ? 'Next page' : 'Sonraki sayfa'">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg>
+          </button>
         </div>
-        <aside x-show="showPdfAnnotations && pdfAnnotations.length" class="w-80 border-l border-slate-700 bg-slate-900/80 flex flex-col" x-cloak>
-          <div class="px-3 py-2 border-b border-slate-700 text-xs font-medium text-slate-300" x-text="aiLanguage === 'en' ? 'PDF Annotations' : 'PDF Notları'"></div>
-          <div class="flex-1 overflow-y-auto p-2 space-y-2" style="overscroll-behavior: contain;">
-            <template x-for="ann in pdfAnnotations" :key="ann.key">
-              <div class="bg-slate-800/50 border border-slate-700 rounded-lg p-2">
-                <div class="flex items-center justify-between gap-2 mb-1">
-                  <span class="text-[10px] text-slate-400" x-text="(aiLanguage === 'en' ? 'Page ' : 'Sayfa ') + ann.pageLabel"></span>
-                  <span class="w-2 h-2 rounded-full" :style="'background:' + (ann.color || '#CC2936')"></span>
-                </div>
-                <p class="text-xs text-slate-200 leading-relaxed line-clamp-2" x-text="ann.text || (aiLanguage === 'en' ? 'No selected text' : 'Seçim metni yok')"></p>
-                <p x-show="ann.comment" class="text-[11px] text-slate-400 leading-relaxed mt-1" x-text="ann.comment"></p>
-              </div>
-            </template>
+
+        <div class="flex items-center gap-1 shrink-0">
+          <button
+            @click="zoomOutPdf()"
+            class="w-7 h-7 inline-flex items-center justify-center rounded-md border border-slate-600 bg-slate-800 hover:bg-slate-700 transition"
+            :title="aiLanguage === 'en' ? 'Zoom out' : 'Uzaklaştır'">-</button>
+          <span class="text-slate-300 min-w-[3.5rem] text-center" x-text="formatPdfZoomLabel()"></span>
+          <button
+            @click="zoomInPdf()"
+            class="w-7 h-7 inline-flex items-center justify-center rounded-md border border-slate-600 bg-slate-800 hover:bg-slate-700 transition"
+            :title="aiLanguage === 'en' ? 'Zoom in' : 'Yakınlaştır'">+</button>
+        </div>
+
+        <div class="flex items-center gap-1 min-w-0 flex-1">
+          <input
+            x-model="pdfSearchQuery"
+            @keydown.enter.prevent.stop="runPdfSearch()"
+            :placeholder="aiLanguage === 'en' ? 'Search in PDF...' : 'PDF içinde ara...'"
+            class="w-full h-7 bg-slate-800 border border-slate-600 rounded-md px-2 text-[11px] text-slate-200 placeholder-slate-500 focus:outline-none focus:border-red-500">
+          <button
+            @click="runPdfSearch()"
+            :disabled="pdfSearchBusy || !pdfPageCount"
+            class="h-7 px-2 rounded-md border border-slate-600 bg-slate-800 hover:bg-slate-700 disabled:opacity-35 transition text-slate-300"
+            x-text="pdfSearchBusy ? (aiLanguage === 'en' ? 'Searching' : 'Aranıyor') : (aiLanguage === 'en' ? 'Search' : 'Ara')"></button>
+          <button
+            @click="goToPrevPdfSearchResult()"
+            :disabled="pdfSearchResults.length === 0"
+            class="w-7 h-7 inline-flex items-center justify-center rounded-md border border-slate-600 bg-slate-800 hover:bg-slate-700 disabled:opacity-35 transition"
+            :title="aiLanguage === 'en' ? 'Previous result' : 'Önceki sonuç'">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="m15 6-6 6 6 6"/></svg>
+          </button>
+          <button
+            @click="goToNextPdfSearchResult()"
+            :disabled="pdfSearchResults.length === 0"
+            class="w-7 h-7 inline-flex items-center justify-center rounded-md border border-slate-600 bg-slate-800 hover:bg-slate-700 disabled:opacity-35 transition"
+            :title="aiLanguage === 'en' ? 'Next result' : 'Sonraki sonuç'">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg>
+          </button>
+          <span class="text-slate-500 text-[10px] min-w-[4.6rem] text-right" x-text="pdfSearchResultLabel()"></span>
+        </div>
+      </div>
+
+      <div class="flex-1 min-h-0 flex overflow-hidden">
+        <template x-if="pdfUseIframeFallback">
+          <div class="flex-1 min-w-0 h-full overflow-hidden flex flex-col">
+            <div class="shrink-0 px-3 py-2 text-[11px] border-b border-amber-500/35 bg-amber-500/10 text-amber-200 flex items-center justify-between gap-2">
+              <span class="truncate" x-text="pdfViewerError || (aiLanguage === 'en' ? 'Fallback viewer is active.' : 'Yedek PDF görüntüleyici aktif.')"></span>
+              <button
+                @click="retryPdfJsViewer()"
+                class="h-6 px-2 rounded-md border border-amber-500/45 bg-amber-500/20 hover:bg-amber-500/30 transition shrink-0 text-[10px]"
+                x-text="aiLanguage === 'en' ? 'Retry PDF.js' : 'PDF.js Tekrar Dene'"></button>
+            </div>
+            <iframe :src="pdfUrl" class="flex-1 w-full h-full bg-white block"></iframe>
+          </div>
+        </template>
+
+        <template x-if="!pdfUseIframeFallback">
+          <div x-ref="pdfScrollContainer" @scroll.passive="onPdfScroll()" class="flex-1 min-w-0 h-full overflow-auto p-3 bg-slate-950/40">
+            <div x-show="pdfViewerError" class="text-xs text-red-300 border border-red-500/40 bg-red-500/10 rounded-md px-3 py-2 mb-3" x-text="pdfViewerError"></div>
+            <div x-show="!pdfViewerError && !pdfViewerReady" class="text-xs text-slate-400 py-8 text-center" x-text="aiLanguage === 'en' ? 'PDF loading...' : 'PDF yükleniyor...'"></div>
+            <div x-ref="pdfPageList" class="pdf-page-list mx-auto w-fit space-y-3">
+              <template x-for="pageNum in pdfPageNumbers" :key="`pdf-page-${pageNum}`">
+                <section class="pdf-page-shell" :data-pdf-page="pageNum">
+                  <div class="pdf-page-meta" x-text="(aiLanguage === 'en' ? 'Page ' : 'Sayfa ') + pageNum"></div>
+                  <div class="pdf-page-surface">
+                    <canvas class="pdf-page-canvas" :data-pdf-canvas-page="pageNum"></canvas>
+                  </div>
+                </section>
+              </template>
+            </div>
+          </div>
+        </template>
+
+        <aside x-show="showPdfAnnotations && (pdfAnnotations.length || pdfSearchResults.length)" class="w-80 border-l border-slate-700 bg-slate-900/80 flex flex-col" x-cloak>
+          <div class="px-3 py-2 border-b border-slate-700 text-xs font-medium text-slate-300" x-text="aiLanguage === 'en' ? 'PDF Side Panel' : 'PDF Yan Paneli'"></div>
+          <div class="flex-1 overflow-y-auto p-2 space-y-3" style="overscroll-behavior: contain;">
+            <div x-show="pdfSearchResults.length">
+              <div class="text-[10px] text-slate-500 uppercase tracking-wide mb-1" x-text="aiLanguage === 'en' ? 'Search Results' : 'Arama Sonuçları'"></div>
+              <template x-for="(res, idx) in pdfSearchResults.slice(0, 40)" :key="`pdf-search-${idx}`">
+                <button @click="goToPdfSearchResult(idx)" class="w-full text-left bg-slate-800/50 border border-slate-700 rounded-lg p-2 hover:border-red-500/40 transition">
+                  <div class="text-[10px] text-slate-400" x-text="(aiLanguage === 'en' ? 'Page ' : 'Sayfa ') + res.page"></div>
+                  <p class="text-[11px] text-slate-200 leading-relaxed line-clamp-3" x-text="res.snippet"></p>
+                </button>
+              </template>
+            </div>
+
+            <div x-show="pdfAnnotations.length">
+              <div class="text-[10px] text-slate-500 uppercase tracking-wide mb-1" x-text="aiLanguage === 'en' ? 'Annotations' : 'Notlar'"></div>
+              <template x-for="ann in pdfAnnotations" :key="ann.key">
+                <button @click="goToPdfPageFromLabel(ann.pageLabel)" class="w-full text-left bg-slate-800/50 border border-slate-700 rounded-lg p-2 hover:border-red-500/40 transition">
+                  <div class="flex items-center justify-between gap-2 mb-1">
+                    <span class="text-[10px] text-slate-400" x-text="(aiLanguage === 'en' ? 'Page ' : 'Sayfa ') + ann.pageLabel"></span>
+                    <span class="w-2 h-2 rounded-full" :style="'background:' + (ann.color || '#CC2936')"></span>
+                  </div>
+                  <p class="text-xs text-slate-200 leading-relaxed line-clamp-2" x-text="ann.text || (aiLanguage === 'en' ? 'No selected text' : 'Seçim metni yok')"></p>
+                  <p x-show="ann.comment" class="text-[11px] text-slate-400 leading-relaxed mt-1" x-text="ann.comment"></p>
+                </button>
+              </template>
+            </div>
           </div>
         </aside>
       </div>

@@ -150,7 +150,7 @@
           this.selectedItem = { ...this.selectedItem, data: nextData };
         }
 
-        this.items = this.items.map((item) => {
+        const updatedItems = this.items.map((item) => {
           if (item.key !== itemKey) return item;
           return {
             ...item,
@@ -161,6 +161,11 @@
             },
           };
         });
+        if (typeof this.setItems === 'function') {
+          this.setItems(updatedItems);
+        } else {
+          this.items = updatedItems;
+        }
       },
 
       async refreshTagCloud() {

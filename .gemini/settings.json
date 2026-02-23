@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "zotero-mcp": {
+      "type": "stdio",
+      "command": "/Users/orhon/.local/bin/zotero-mcp",
+      "args": [],
+      "env": {}
+    }
+  },
+  "mcp": {
+    "allowed": [
+      "zotero-mcp"
+    ]
+  }
+}

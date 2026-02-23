@@ -20,27 +20,135 @@
         else this.expandedCollections.push(key);
       },
 
-      async apiFetch(path) {
-        const res = await fetch(`${ns.API}${path}`);
-        if (!res.ok) {
-          let detail = '';
+      bumpItemsVersion() {
+        this._itemsVersion = Number(this._itemsVersion || 0) + 1;
+      },
+
+      setItems(items) {
+        this.items = Array.isArray(items) ? items : [];
+        this.bumpItemsVersion();
+      },
+
+      fetchConcurrencyLimit() {
+        return 6;
+      },
+
+      fetchRetryAttempts() {
+        return 3;
+      },
+
+      fetchRetryBaseDelayMs() {
+        return 280;
+      },
+
+      isAbortError(error) {
+        return error?.name === 'AbortError';
+      },
+
+      async sleepMs(ms) {
+        return new Promise((resolve) => {
+          window.setTimeout(resolve, Math.max(0, Number(ms) || 0));
+        });
+      },
+
+      async readApiErrorDetail(res) {
+        try {
+          const text = (await res.text() || '').trim();
+          if (!text) return '';
           try {
-            const text = (await res.text() || '').trim();
-            if (text) {
-              let parsed = null;
-              try {
-                parsed = JSON.parse(text);
-              } catch (e) {
-                // no-op
-              }
-              detail = parsed?.error || text;
-            }
+            const parsed = JSON.parse(text);
+            return parsed?.error || parsed?.message || text;
           } catch (e) {
-            // no-op
+            return text;
           }
-          throw new Error(`API ${res.status}${detail ? `: ${detail}` : ''}`);
+        } catch (e) {
+          return '';
         }
-        return { res, data: await res.json() };
+      },
+
+      async fetchWithRetry(url, options = {}) {
+        const attempts = Math.max(1, Number(options.attempts || this.fetchRetryAttempts()));
+        const baseDelay = Math.max(120, Number(options.baseDelayMs || this.fetchRetryBaseDelayMs()));
+        const method = options.method || 'GET';
+        const headers = options.headers || {};
+        const body = options.body;
+        const signal = options.signal;
+
+        let lastError = null;
+        for (let attempt = 1; attempt <= attempts; attempt += 1) {
+          try {
+            const res = await fetch(url, { method, headers, body, signal });
+            if (res.ok) return res;
+
+            const detail = await this.readApiErrorDetail(res);
+            const retryableStatus = res.status === 429 || res.status >= 500;
+            const canRetry = attempt < attempts && retryableStatus;
+            if (!canRetry) {
+              const nonRetryError = new Error(`API ${res.status}${detail ? `: ${detail}` : ''}`);
+              nonRetryError.nonRetry = true;
+              throw nonRetryError;
+            }
+            lastError = new Error(`API ${res.status}${detail ? `: ${detail}` : ''}`);
+          } catch (e) {
+            if (this.isAbortError(e)) throw e;
+            if (e?.nonRetry) throw e;
+            lastError = e;
+            if (attempt >= attempts) break;
+          }
+          const backoffMs = baseDelay * Math.pow(2, attempt - 1);
+          await this.sleepMs(backoffMs);
+        }
+        throw lastError || new Error('Unknown network error');
+      },
+
+      async fetchJsonAbsolute(url, options = {}) {
+        const res = await this.fetchWithRetry(url, options);
+        let data = null;
+        try {
+          data = await res.json();
+        } catch (e) {
+          throw new Error(this.aiLanguage === 'en' ? 'Invalid JSON response' : 'Geçersiz JSON yanıtı');
+        }
+        return { res, data };
+      },
+
+      async runTasksWithConcurrency(taskFns, limit = this.fetchConcurrencyLimit()) {
+        const tasks = Array.isArray(taskFns) ? taskFns : [];
+        if (!tasks.length) return [];
+        const maxWorkers = Math.max(1, Math.min(Number(limit) || 1, tasks.length));
+        const results = new Array(tasks.length);
+        let nextIdx = 0;
+        const worker = async () => {
+          while (true) {
+            const idx = nextIdx;
+            nextIdx += 1;
+            if (idx >= tasks.length) return;
+            results[idx] = await tasks[idx]();
+          }
+        };
+        await Promise.all(Array.from({ length: maxWorkers }, () => worker()));
+        return results;
+      },
+
+      beginVisibleItemsRequest() {
+        if (this._visibleItemsAbortController) {
+          this._visibleItemsAbortController.abort();
+        }
+        const controller = new AbortController();
+        this._visibleItemsAbortController = controller;
+        this._visibleItemsRequestSeq = Number(this._visibleItemsRequestSeq || 0) + 1;
+        return {
+          controller,
+          requestSeq: this._visibleItemsRequestSeq,
+        };
+      },
+
+      isLatestVisibleItemsRequest(requestSeq) {
+        return Number(requestSeq || 0) === Number(this._visibleItemsRequestSeq || 0);
+      },
+
+      async apiFetch(path) {
+        return this.fetchJsonAbsolute(`${ns.API}${path}`);
       },
 
       selfCheckStatusLabel(status) {
@@ -180,8 +288,20 @@
           if (typeof this.loadAiAnalysisModePreference === 'function') {
             this.loadAiAnalysisModePreference();
           }
+          if (typeof this.loadPipelineTemplatePreference === 'function') {
+            this.loadPipelineTemplatePreference();
+          }
+          if (typeof this.loadPipelineChunkLimitPreference === 'function') {
+            this.loadPipelineChunkLimitPreference();
+          }
           if (typeof this.loadListDensityPreference === 'function') {
             this.loadListDensityPreference();
+          }
+          if (typeof this.loadDetailPanelWidthPreference === 'function') {
+            this.loadDetailPanelWidthPreference();
+          }
+          if (typeof this.bindDetailPanelViewportSync === 'function') {
+            this.bindDetailPanelViewportSync();
           }
           if (typeof this.runStartupSelfCheck === 'function') {
             await this.runStartupSelfCheck(false);
@@ -217,7 +337,10 @@
             this.apiFetch('/tags?format=json'),
           ]);
 
-          this.items = itemsR.data;
+          this.setItems(itemsR.data);
+          if (typeof this.rememberItems === 'function') {
+            this.rememberItems(this.items);
+          }
           this.collections = colsR.data;
           this.allTags = tagsR.data
             .map((t) => ({ tag: t.tag, count: t.meta?.numItems || 0 }))
@@ -276,12 +399,26 @@
       },
 
       async loadAllItems(total) {
-        const promises = [];
+        const tasks = [];
         for (let start = 100; start < total; start += 100) {
-          promises.push(fetch(`${ns.API}/items?format=json&limit=100&start=${start}`).then((r) => r.json()));
+          const pageUrl = `${ns.API}/items?format=json&limit=100&start=${start}`;
+          tasks.push(async () => {
+            const page = await this.fetchJsonAbsolute(pageUrl);
+            return Array.isArray(page.data) ? page.data : [];
+          });
         }
-        for (const batch of await Promise.all(promises)) this.items = this.items.concat(batch);
+        const batches = await this.runTasksWithConcurrency(tasks, this.fetchConcurrencyLimit());
+        const merged = [...this.items];
+        batches.forEach((batch) => {
+          if (Array.isArray(batch) && batch.length) {
+            merged.push(...batch);
+          }
+        });
+        this.setItems(merged);
 
+        if (typeof this.rememberItems === 'function') {
+          this.rememberItems(this.items);
+        }
         this.allItemsCount = this.items.filter((i) => this.isPrimaryLibraryItem(i)).length;
         this.markPdfItems();
       },
@@ -295,27 +432,49 @@
         return url;
       },
 
-      async fetchAllPages(baseUrl) {
-        const firstRes = await fetch(`${baseUrl}&limit=100&start=0`);
-        if (!firstRes.ok) throw new Error(`API ${firstRes.status}`);
-
-        let rows = await firstRes.json();
-        const total = parseInt(firstRes.headers.get('Total-Results') || `${rows.length}`, 10);
+      async fetchAllPages(baseUrl, options = {}) {
+        const signal = options.signal;
+        const first = await this.fetchJsonAbsolute(`${baseUrl}&limit=100&start=0`, { signal });
+        let rows = Array.isArray(first.data) ? first.data : [];
+        const total = parseInt(first.res.headers.get('Total-Results') || `${rows.length}`, 10);
         if (total > 100) {
-          const rest = [];
+          const tasks = [];
           for (let start = 100; start < total; start += 100) {
-            rest.push(fetch(`${baseUrl}&limit=100&start=${start}`).then((r) => r.json()));
+            const pageUrl = `${baseUrl}&limit=100&start=${start}`;
+            tasks.push(async () => {
+              const page = await this.fetchJsonAbsolute(pageUrl, { signal });
+              return Array.isArray(page.data) ? page.data : [];
+            });
           }
-          for (const batch of await Promise.all(rest)) rows = rows.concat(batch);
+          const batches = await this.runTasksWithConcurrency(tasks, this.fetchConcurrencyLimit());
+          batches.forEach((batch) => {
+            if (Array.isArray(batch) && batch.length) {
+              rows = rows.concat(batch);
+            }
+          });
         }
         return rows;
       },
 
       async reloadVisibleItems() {
-        this.items = await this.fetchAllPages(this.currentItemsBaseUrl());
-        const currentKeys = new Set(this.items.map((i) => i.key));
-        this.selectedCompareKeys = this.selectedCompareKeys.filter((k) => currentKeys.has(k));
-        this.markPdfItems();
+        const { controller, requestSeq } = this.beginVisibleItemsRequest();
+        try {
+          const rows = await this.fetchAllPages(this.currentItemsBaseUrl(), { signal: controller.signal });
+          if (!this.isLatestVisibleItemsRequest(requestSeq)) return false;
+          this.setItems(rows);
+          if (typeof this.rememberItems === 'function') {
+            this.rememberItems(this.items);
+          }
+          this.markPdfItems();
+          return true;
+        } catch (e) {
+          if (this.isAbortError(e)) return false;
+          throw e;
+        } finally {
+          if (this._visibleItemsAbortController === controller) {
+            this._visibleItemsAbortController = null;
+          }
+        }
       },
 
       async search() {
@@ -324,6 +483,7 @@
         try {
           await this.reloadVisibleItems();
         } catch (e) {
+          if (this.isAbortError(e)) return;
           this.showToast(this.aiLanguage === 'en' ? 'Search failed' : 'Arama sırasında hata oluştu');
         }
       },
@@ -335,6 +495,7 @@
         try {
           await this.reloadVisibleItems();
         } catch (e) {
+          if (this.isAbortError(e)) return;
           this.showToast(this.aiLanguage === 'en' ? 'Collection could not be loaded' : 'Koleksiyon yüklenemedi');
         }
       },
@@ -365,6 +526,7 @@
         try {
           await this.reloadVisibleItems();
         } catch (e) {
+          if (this.isAbortError(e)) return;
           this.showToast(this.aiLanguage === 'en' ? 'Filters could not be reset' : 'Filtreler sıfırlanamadı');
         }
       },

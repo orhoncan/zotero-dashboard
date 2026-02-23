@@ -4,7 +4,64 @@
   ns.registerMixin(function registerChat() {
     return {
       chatCacheStorageKey() {
-        return 'zotero-chat-cache-v1';
+        return 'zotero-chat-cache-v2';
+      },
+
+      chatCacheLimits() {
+        return {
+          maxEntries: 120,
+          ttlMs: 1000 * 60 * 60 * 24 * 30,
+        };
+      },
+
+      nowMs() {
+        return Date.now();
+      },
+
+      normalizeCacheEntry(entry) {
+        const raw = entry && typeof entry === 'object' ? entry : {};
+        const messages = Array.isArray(raw.messages) ? raw.messages : [];
+        const error = typeof raw.error === 'string' ? raw.error : '';
+        const editor = typeof raw.editor === 'string' ? raw.editor : '';
+        const contextKeys = Array.isArray(raw.contextKeys) ? raw.contextKeys : [];
+        const savedAt = Number(raw.savedAt || raw.updatedAt || raw.createdAt || 0);
+        const lastAccessedAt = Number(raw.lastAccessedAt || savedAt || 0);
+        return {
+          messages,
+          error,
+          editor,
+          contextKeys,
+          savedAt: Number.isFinite(savedAt) ? savedAt : 0,
+          lastAccessedAt: Number.isFinite(lastAccessedAt) ? lastAccessedAt : 0,
+        };
+      },
+
+      pruneChatCache(options = {}) {
+        const limits = this.chatCacheLimits();
+        const ttlMs = Math.max(60 * 1000, Number(limits.ttlMs || 0));
+        const maxEntries = Math.max(8, Number(limits.maxEntries || 0));
+        const now = this.nowMs();
+        const next = {};
+        const rows = [];
+
+        Object.entries(this.chatCache || {}).forEach(([key, value]) => {
+          const normalized = this.normalizeCacheEntry(value);
+          const lastSeen = Number(normalized.lastAccessedAt || normalized.savedAt || 0);
+          if (lastSeen > 0 && now - lastSeen > ttlMs) return;
+          rows.push({ key, value: normalized, lastSeen });
+        });
+
+        rows.sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0));
+        rows.slice(0, maxEntries).forEach((row) => {
+          next[row.key] = row.value;
+        });
+
+        const changed = Object.keys(next).length !== Object.keys(this.chatCache || {}).length;
+        this.chatCache = next;
+        if (!options.skipPersist && changed) {
+          this.persistChatCacheToStorage({ skipPrune: true, silent: true });
+        }
+        return changed;
       },
 
       normalizeAiProvider(provider) {
@@ -48,10 +105,24 @@
           ? requestedKey
           : this.chatScopeKey(requestedKey, this.aiProvider, this.aiModel, this.aiAnalysisMode);
         const itemFallbackKey = requestedKey.includes('::') ? requestedKey.split('::')[0] : requestedKey;
-        const cached = this.chatCache?.[normalizedKey] || this.chatCache?.[itemFallbackKey];
-        this.chatMessages = cached?.messages ? [...cached.messages] : [];
-        this.chatError = cached?.error || '';
-        this.noteEditorContent = cached?.editor || '';
+        const hitKey = this.chatCache?.[normalizedKey] ? normalizedKey : (this.chatCache?.[itemFallbackKey] ? itemFallbackKey : '');
+        const cachedRaw = hitKey ? this.chatCache?.[hitKey] : null;
+        const cached = this.normalizeCacheEntry(cachedRaw || {});
+
+        this.chatMessages = cached.messages ? [...cached.messages] : [];
+        this.chatError = cached.error || '';
+        this.noteEditorContent = cached.editor || '';
+        this.aiContextKeys = Array.isArray(cached.contextKeys) ? [...cached.contextKeys] : [];
+        this.sanitizeAiContextKeys();
+
+        if (hitKey) {
+          this.chatCache[hitKey] = {
+            ...cached,
+            lastAccessedAt: this.nowMs(),
+            savedAt: cached.savedAt || this.nowMs(),
+          };
+          this.persistChatCacheToStorage({ skipPrune: false, silent: true });
+        }
       },
 
       loadPersistedChatCache() {
@@ -61,6 +132,7 @@
           const parsed = JSON.parse(raw);
           if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return;
           this.chatCache = parsed;
+          this.pruneChatCache({ skipPersist: true });
           if (!this.selectedItem) {
             this.applyChatStateFromCache(this.chatScopeKey('__global__', this.aiProvider, this.aiModel, this.aiAnalysisMode));
           }
@@ -69,11 +141,28 @@
         }
       },
 
-      persistChatCacheToStorage() {
+      persistChatCacheToStorage(options = {}) {
+        if (!options.skipPrune) {
+          this.pruneChatCache({ skipPersist: true });
+        }
         try {
           localStorage.setItem(this.chatCacheStorageKey(), JSON.stringify(this.chatCache || {}));
         } catch (e) {
-          // no-op
+          const isQuotaError = e?.name === 'QuotaExceededError' || e?.code === 22;
+          if (!isQuotaError) return;
+          this.pruneChatCache({ skipPersist: true });
+          try {
+            localStorage.setItem(this.chatCacheStorageKey(), JSON.stringify(this.chatCache || {}));
+          } catch (retryErr) {
+            if (!options.silent && !this._chatCacheWarned) {
+              this._chatCacheWarned = true;
+              this.showToast(
+                this.aiLanguage === 'en'
+                  ? 'Chat cache is full, older history was trimmed'
+                  : 'Sohbet önbelleği dolu, eski geçmiş kırpıldı'
+              );
+            }
+          }
         }
       },
 
@@ -161,6 +250,102 @@
 
       analysisModeStorageKey() {
         return 'zotero-ai-analysis-mode';
+      },
+
+      pipelineTemplateStorageKey() {
+        return 'zotero-pipeline-template';
+      },
+
+      pipelineChunkLimitStorageKey() {
+        return 'zotero-pipeline-chunk-limit';
+      },
+
+      pipelineTemplateOptions() {
+        if (this.aiLanguage === 'en') {
+          return [
+            { value: 'study', label: 'Study Note' },
+            { value: 'presentation', label: 'Presentation' },
+            { value: 'review', label: 'Peer Review' },
+            { value: 'thesis_notes', label: 'Research Notes' },
+            { value: 'policy_brief', label: 'Policy Brief' },
+          ];
+        }
+        return [
+          { value: 'study', label: 'Çalışma Notu' },
+          { value: 'presentation', label: 'Sunum' },
+          { value: 'review', label: 'Hakem Değerlendirmesi' },
+          { value: 'thesis_notes', label: 'Araştırma Notu' },
+          { value: 'policy_brief', label: 'Politika Özeti' },
+        ];
+      },
+
+      pipelineChunkLimitOptions() {
+        return [
+          { value: 'auto', label: this.aiLanguage === 'en' ? 'Auto' : 'Otomatik' },
+          { value: '4', label: '4' },
+          { value: '8', label: '8' },
+          { value: '12', label: '12' },
+          { value: '16', label: '16' },
+        ];
+      },
+
+      normalizePipelineTemplate(value) {
+        const allowed = new Set(['study', 'presentation', 'review', 'thesis_notes', 'policy_brief']);
+        const normalized = String(value || '').trim();
+        return allowed.has(normalized) ? normalized : 'study';
+      },
+
+      normalizePipelineChunkLimit(value) {
+        const normalized = String(value || '').trim().toLowerCase();
+        if (!normalized || normalized === 'auto') return 'auto';
+        const parsed = parseInt(normalized, 10);
+        if (!Number.isFinite(parsed)) return 'auto';
+        if (![4, 8, 12, 16].includes(parsed)) return 'auto';
+        return String(parsed);
+      },
+
+      loadPipelineTemplatePreference() {
+        try {
+          const saved = localStorage.getItem(this.pipelineTemplateStorageKey());
+          this.pipelineTemplate = this.normalizePipelineTemplate(saved || this.pipelineTemplate);
+        } catch (e) {
+          this.pipelineTemplate = this.normalizePipelineTemplate(this.pipelineTemplate);
+        }
+      },
+
+      persistPipelineTemplatePreference() {
+        this.pipelineTemplate = this.normalizePipelineTemplate(this.pipelineTemplate);
+        try {
+          localStorage.setItem(this.pipelineTemplateStorageKey(), this.pipelineTemplate);
+        } catch (e) {
+          // no-op
+        }
+      },
+
+      onPipelineTemplateChange() {
+        this.persistPipelineTemplatePreference();
+      },
+
+      loadPipelineChunkLimitPreference() {
+        this.pipelineChunkLimit = 'auto';
+        try {
+          localStorage.removeItem(this.pipelineChunkLimitStorageKey());
+        } catch (e) {
+          // no-op
+        }
+      },
+
+      persistPipelineChunkLimitPreference() {
+        this.pipelineChunkLimit = 'auto';
+        try {
+          localStorage.removeItem(this.pipelineChunkLimitStorageKey());
+        } catch (e) {
+          // no-op
+        }
+      },
+
+      onPipelineChunkLimitChange() {
+        this.persistPipelineChunkLimitPreference();
       },
 
       analysisModeOptions() {
@@ -315,9 +500,9 @@
 
       languagePurityDirective() {
         if (this.aiLanguage === 'en') {
-          return 'Language rule: Write ONLY in English with proper English grammar, punctuation, and wording. Do not use Turkish words, except unavoidable proper nouns from the source text.';
+          return 'Language rule: Write ONLY in English with proper English grammar, punctuation, and wording. Do not use Turkish words, except unavoidable proper nouns from the source text. Do not include process narration such as "I now have enough content" or "I will now produce the output".';
         }
-        return 'Dil kuralı: YANITI TAMAMEN Türkçe yaz. Türkçe dilbilgisi, noktalama ve anlatım kurallarına uy. Kaynak metindeki zorunlu özel adlar dışında yabancı kelime kullanma.';
+        return 'Dil kuralı: YANITI TAMAMEN Türkçe yaz. Türkçe dilbilgisi, noktalama ve anlatım kurallarına uy. Kaynak metindeki zorunlu özel adlar dışında yabancı kelime kullanma. "Yeterli içerik elde ettim" veya "Çıktıyı şimdi üretiyorum" gibi süreç cümleleri yazma.';
       },
 
       sourceGroundingDirective(supportsMcp = false) {
@@ -541,6 +726,150 @@
         this.showToast(this.aiLanguage === 'en' ? 'Chat cleared' : 'Sohbet temizlendi');
       },
 
+      aiContextSelectionLimit() {
+        return 8;
+      },
+
+      sanitizeAiContextKeys() {
+        const selectedKey = String(this.selectedItem?.key || '');
+        const existing = Array.isArray(this.aiContextKeys) ? this.aiContextKeys : [];
+        const seen = new Set();
+        const next = [];
+        existing.forEach((key) => {
+          const normalized = String(key || '').trim();
+          if (!normalized || normalized === selectedKey || seen.has(normalized)) return;
+          const item = typeof this.findItemByKey === 'function'
+            ? this.findItemByKey(normalized)
+            : this.items.find((row) => row.key === normalized);
+          if (!item || !this.isPrimaryLibraryItem(item)) return;
+          seen.add(normalized);
+          next.push(normalized);
+        });
+        this.aiContextKeys = next.slice(0, this.aiContextSelectionLimit());
+      },
+
+      aiContextIncludes(itemKey) {
+        const key = String(itemKey || '').trim();
+        if (!key) return false;
+        return Array.isArray(this.aiContextKeys) && this.aiContextKeys.includes(key);
+      },
+
+      aiContextSelectedItems() {
+        const selected = [];
+        const seen = new Set();
+        const push = (item, force = false) => {
+          if (!item?.key || seen.has(item.key)) return;
+          if (!force && !this.isPrimaryLibraryItem(item)) return;
+          selected.push(item);
+          seen.add(item.key);
+        };
+
+        if (this.selectedItem) {
+          // Always keep active item in context, even if type metadata is imperfect.
+          push(this.selectedItem, true);
+        }
+        (this.selectedCompareKeys || []).forEach((key) => {
+          const item = typeof this.findItemByKey === 'function'
+            ? this.findItemByKey(key)
+            : this.items.find((row) => row.key === key);
+          if (item) push(item);
+        });
+        (this.aiContextKeys || []).forEach((key) => {
+          const item = typeof this.findItemByKey === 'function'
+            ? this.findItemByKey(key)
+            : this.items.find((row) => row.key === key);
+          if (item) push(item);
+        });
+        return selected;
+      },
+
+      aiContextCandidateItems(limit = 12) {
+        const maxOthers = Math.max(4, Number(limit || 12));
+        const byKey = new Map();
+        const push = (item) => {
+          if (!item?.key || byKey.has(item.key)) return;
+          if (!this.isPrimaryLibraryItem(item)) return;
+          byKey.set(item.key, item);
+        };
+
+        if (this.selectedItem) push(this.selectedItem);
+        (this.aiContextKeys || []).forEach((key) => {
+          const item = typeof this.findItemByKey === 'function'
+            ? this.findItemByKey(key)
+            : this.items.find((row) => row.key === key);
+          if (item) push(item);
+        });
+        (this.selectedCompareKeys || []).forEach((key) => {
+          const item = typeof this.findItemByKey === 'function'
+            ? this.findItemByKey(key)
+            : this.items.find((row) => row.key === key);
+          if (item) push(item);
+        });
+        (this.paginatedItems || []).forEach((item) => push(item));
+        if (byKey.size < maxOthers + 1) {
+          (this.recentItems || []).forEach((item) => push(item));
+        }
+
+        const selectedKey = this.selectedItem?.key || '';
+        const all = Array.from(byKey.values());
+        const primary = selectedKey ? all.find((item) => item.key === selectedKey) : null;
+        const others = all.filter((item) => item.key !== selectedKey);
+        return primary ? [primary, ...others.slice(0, maxOthers)] : others.slice(0, maxOthers + 1);
+      },
+
+      toggleAiContextItem(itemKey, checked) {
+        const key = String(itemKey || '').trim();
+        if (!key || key === String(this.selectedItem?.key || '')) return;
+        this.sanitizeAiContextKeys();
+        const exists = this.aiContextIncludes(key);
+
+        if (checked && !exists) {
+          if (this.aiContextKeys.length >= this.aiContextSelectionLimit()) {
+            this.showToast(
+              this.aiLanguage === 'en'
+                ? `You can add up to ${this.aiContextSelectionLimit()} extra papers`
+                : `En fazla ${this.aiContextSelectionLimit()} ek makale ekleyebilirsiniz`
+            );
+            return;
+          }
+          this.aiContextKeys = [...this.aiContextKeys, key];
+          this.persistChatForCurrentItem();
+          return;
+        }
+
+        if (!checked && exists) {
+          this.aiContextKeys = this.aiContextKeys.filter((k) => k !== key);
+          this.persistChatForCurrentItem();
+        }
+      },
+
+      clearAiContextSelection() {
+        const hasManual = Array.isArray(this.aiContextKeys) && this.aiContextKeys.length > 0;
+        const hasCompare = Array.isArray(this.selectedCompareKeys) && this.selectedCompareKeys.length > 0;
+        if (!hasManual && !hasCompare) return;
+        this.aiContextKeys = [];
+        if (hasCompare && typeof this.clearCompareSelection === 'function') {
+          this.clearCompareSelection();
+        }
+        this.persistChatForCurrentItem();
+      },
+
+      zoteroItemApiBase(item = this.selectedItem) {
+        const libraryType = String(item?.library?.type || '').trim().toLowerCase();
+        const rawLibraryId = item?.library?.id ?? item?.data?.libraryID ?? this.userId;
+        const libraryId = Number(rawLibraryId);
+        if (libraryType === 'group' && Number.isFinite(libraryId) && libraryId > 0) {
+          return `/api/groups/${libraryId}`;
+        }
+        if (Number.isFinite(libraryId) && libraryId >= 0) {
+          return `/api/users/${libraryId}`;
+        }
+        if (typeof ns.API === 'string' && /^\/api\/(users|groups)\/\d+$/.test(ns.API)) {
+          return ns.API;
+        }
+        return '/api/users/0';
+      },
+
       persistAiLanguage() {
         try {
           localStorage.setItem('zotero-ui-language', this.aiLanguage);
@@ -563,13 +892,76 @@
           summarize: 'Özetle',
           notes: 'Notları Analiz Et',
           related: 'İlgili Çalışmalar',
-          critique: 'Kritik Değerlendir',
+          critique: 'Eleştirel Değerlendirme',
         };
       },
 
       quickPromptButtonLabel(type) {
         const labels = this.quickPromptLabels();
         return labels[type] || type;
+      },
+
+      templateDirectiveText() {
+        const template = this.normalizePipelineTemplate(this.pipelineTemplate);
+        if (this.aiLanguage === 'en') {
+          const map = {
+            study:
+              'Use Study Note format: (1) structured summary, (2) concepts/definitions, (3) method and evidence, (4) key findings, (5) limitations, (6) study checklist.',
+            presentation:
+              'Use Presentation format: (1) 8-12 slide outline, (2) speaker notes, (3) visual suggestion per slide, (4) Q&A prep.',
+            review:
+              'Use Peer Review format: (1) summary for editor, (2) major comments, (3) minor comments, (4) recommendation with rationale.',
+            thesis_notes:
+              'Use Research Notes format: (1) literature placement, (2) reusable argument blocks, (3) method relevance, (4) citation-ready notes, (5) research gap map.',
+            policy_brief:
+              'Use Policy Brief format: (1) problem framing, (2) evidence highlights, (3) policy options, (4) risks/tradeoffs, (5) action roadmap.',
+          };
+          return map[template] || map.study;
+        }
+        const map = {
+          study:
+            'Çalışma Notu formatı kullan: (1) yapılandırılmış özet, (2) kavramlar/tanımlar, (3) yöntem ve kanıt, (4) temel bulgular, (5) sınırlılıklar, (6) çalışma kontrol listesi.',
+          presentation:
+            'Sunum formatı kullan: (1) 8-12 slayt akışı, (2) konuşmacı notları, (3) slayt başına görsel önerisi, (4) soru-cevap hazırlığı.',
+          review:
+            'Hakem Değerlendirmesi formatı kullan: (1) editöre özet, (2) majör yorumlar, (3) minör yorumlar, (4) gerekçeli karar önerisi.',
+          thesis_notes:
+            'Araştırma Notu formatı kullan: (1) literatürde konum, (2) yeniden kullanılabilir argüman blokları, (3) yöntem uygunluğu, (4) atıf hazır notlar, (5) araştırma boşluk haritası.',
+          policy_brief:
+            'Politika Özeti formatı kullan: (1) sorun çerçevesi, (2) kanıt özeti, (3) politika seçenekleri, (4) riskler/ödünleşimler, (5) eylem yol haritası.',
+        };
+        return map[template] || map.study;
+      },
+
+      applyTemplateDirectiveToPrompt(prompt) {
+        const base = String(prompt || '').trim();
+        if (!base) return '';
+        const directive = this.templateDirectiveText();
+        const header = this.aiLanguage === 'en' ? 'OUTPUT TEMPLATE:' : 'ÇIKTI ŞABLONU:';
+        const conflictRule = this.aiLanguage === 'en'
+          ? 'If another output format is requested, silently prioritize this template. Do not add format-conflict warnings.'
+          : 'Başka bir çıktı biçimi istense bile bu şablonu sessizce önceliklendir. Biçim çakışması uyarısı yazma.';
+        if (!directive || base.includes(header)) return base;
+        return `${base}\n\n${header}\n- ${directive}\n- ${conflictRule}`;
+      },
+
+      quickPromptPipelineQuery(type) {
+        if (this.aiLanguage === 'en') {
+          const prompts = {
+            summarize: 'Create a concise section-wise summary with method, findings, and limitations.',
+            notes: 'Create structured study notes from the full text with key evidence and action items.',
+            related: 'Derive likely related-work directions and useful search keywords from the full text.',
+            critique: 'Provide a critical review with strengths, weaknesses, risks, and improvements.',
+          };
+          return prompts[type] || 'Analyze the full PDF with a section-wise synthesis.';
+        }
+        const prompts = {
+          summarize: 'Tam metinden bölüm bazlı kısa özet çıkar; yöntem, bulgular ve sınırlılıkları ver.',
+          notes: 'Tam metinden yapılandırılmış çalışma notu üret; kanıtları ve eylem maddelerini yaz.',
+          related: 'Tam metinden ilişkili çalışma yönleri ve yararlı arama anahtar kelimeleri çıkar.',
+          critique: 'Güçlü/zayıf yönler, riskler ve geliştirme önerileriyle eleştirel değerlendirme yap.',
+        };
+        return prompts[type] || 'Tam PDF üzerinden bölüm bazlı sentezle derin analiz yap.';
       },
 
       buildQuickPrompt(type, title, key) {
@@ -627,10 +1019,10 @@
         this.itemNotes = [];
         this.itemAnnotations = [];
         this.chatInput = '';
-        this.noteEditorOpen = true;
         this.clearCompareChatMode();
 
         this.applyChatStateFromCache(this.chatScopeKey(item.key, this.aiProvider, this.aiModel, this.aiAnalysisMode));
+        this.sanitizeAiContextKeys();
         if (typeof this.syncMetadataEditorFromSelectedItem === 'function') {
           this.syncMetadataEditorFromSelectedItem();
         }
@@ -676,17 +1068,22 @@
 
       persistChatForCurrentItem() {
         const cacheKey = this.currentChatScopeKey();
+        const now = this.nowMs();
         this.chatCache[cacheKey] = {
           messages: [...this.chatMessages],
           error: this.chatError || '',
           editor: this.noteEditorContent || '',
+          contextKeys: [...(this.aiContextKeys || [])],
+          savedAt: now,
+          lastAccessedAt: now,
         };
         this.persistChatCacheToStorage();
       },
 
-      buildContext(mode = this.aiAnalysisMode) {
-        const data = this.selectedItem?.data || {};
+      buildSingleContextForItem(item, mode = this.aiAnalysisMode, options = {}) {
+        const data = item?.data || {};
         const cfg = this.analysisModeContextConfig(mode);
+        const includeLoadedNotes = !!options.includeLoadedNotes;
         const labels =
           this.aiLanguage === 'en'
             ? {
@@ -715,7 +1112,7 @@
           context += `${labels.abstract}: ${this.compactContextText(data.abstractNote, cfg.abstractMax, cfg.abstractSentences)}\n`;
         }
 
-        if (this.itemNotes.length) {
+        if (includeLoadedNotes && this.itemNotes.length) {
           const notesToUse = this.itemNotes.slice(0, cfg.noteCount);
           context += `\n${labels.notes}:\n`;
           notesToUse.forEach((note) => {
@@ -730,6 +1127,41 @@
           });
         }
         return context;
+      },
+
+      buildContext(mode = this.aiAnalysisMode) {
+        const items = this.aiContextSelectedItems();
+        if (!items.length) return '';
+        if (items.length === 1) {
+          return this.buildSingleContextForItem(items[0], mode, { includeLoadedNotes: true });
+        }
+
+        const labels =
+          this.aiLanguage === 'en'
+            ? {
+                included: 'Included context documents',
+                primary: 'Primary document',
+                item: 'Document',
+                untitled: 'Untitled',
+              }
+            : {
+                included: 'Dahil edilen bağlam dokümanları',
+                primary: 'Ana doküman',
+                item: 'Doküman',
+                untitled: 'Başlıksız',
+              };
+
+        let context = `${labels.included}: ${items.length}\n`;
+        items.forEach((item, idx) => {
+          const isPrimary = item.key === this.selectedItem?.key;
+          const title = item.data?.title || labels.untitled;
+          const rowLabel = isPrimary ? `${labels.primary}` : `${labels.item} ${idx + 1}`;
+          context += `\n[${rowLabel}] ${title} (key: ${item.key})\n`;
+          context += this.buildSingleContextForItem(item, mode, {
+            includeLoadedNotes: isPrimary,
+          });
+        });
+        return context.trim();
       },
 
       loadLastAssistantToEditor() {
@@ -1063,37 +1495,120 @@
         const key = this.selectedItem.key;
         const title = this.selectedItem.data.title;
         const labels = this.quickPromptLabels();
-        const prompt = this.buildQuickPrompt(type, title, key);
+        let prompt = this.buildQuickPrompt(type, title, key);
         this.chatMessages.push({ role: 'user', content: prompt, display: `${labels[type]}: ${title}` });
         this.persistChatForCurrentItem();
-        await this._sendToApi(prompt);
+        await this._sendToApi(prompt, {
+          bigPdfPipeline: false,
+          bigPdfQuery: '',
+          pipelineTemplate: this.pipelineTemplate,
+          pipelineChunkLimit: this.pipelineChunkLimit,
+        });
+      },
+
+      parseBigPdfPipelineRequest(rawMessage) {
+        const original = String(rawMessage || '').trim();
+        if (!original) {
+          return { enabled: false, message: '' };
+        }
+
+        const normalized = original.toLocaleLowerCase(this.aiLanguage === 'en' ? 'en-US' : 'tr-TR');
+        const prefixes = ['/pipeline', '/bigpdf', '/largepdf', '/uzunpdf', '/buyukpdf', '/büyükpdf'];
+        const matchedPrefix = prefixes.find((prefix) => normalized.startsWith(prefix));
+        if (!matchedPrefix) {
+          return { enabled: false, message: original };
+        }
+
+        const rawTail = original.slice(matchedPrefix.length).trim().replace(/^[:\-]\s*/, '');
+        const fallbackPrompt = this.aiLanguage === 'en'
+          ? 'Analyze this full PDF in depth with section-wise synthesis.'
+          : 'Bu PDF\'yi tam metin üzerinden bölüm bazlı derin analiz et.';
+
+        return {
+          enabled: true,
+          message: rawTail || fallbackPrompt,
+        };
+      },
+
+      pipelineQuickCommand() {
+        if (this.aiLanguage === 'en') {
+          return '/pipeline Produce a section-wise deep summary with methods, findings, limitations, and practical takeaways.';
+        }
+        return '/pipeline Bölüm bazlı derin özet çıkar; yöntem, bulgular, sınırlılıklar ve uygulanabilir çıkarımlar ver.';
+      },
+
+      pipelineQuickButtonLabel() {
+        return this.aiLanguage === 'en'
+          ? 'Use Full PDF for Analysis'
+          : "Analizde Tüm PDF'yi Kullan";
+      },
+
+      async sendBigPdfPipelineQuick() {
+        if (!this.selectedItem || this.chatLoading) return;
+        this.chatInput = this.pipelineQuickCommand();
+        await this.sendChatMessage();
       },
 
       async sendChatMessage() {
         if (!this.chatInput.trim() || this.chatLoading) return;
 
         this.clearCompareChatMode();
-        const message = this.chatInput.trim();
+        const rawMessage = this.chatInput.trim();
+        const pipelineRequest = this.parseBigPdfPipelineRequest(rawMessage);
+        const explicitPipeline = !!pipelineRequest.enabled;
+        const hasSelectedItem = !!this.selectedItem;
+        const hasPdfForPipeline = !!this.selectedItem?._hasPdf;
+        let pipelineEnabled = explicitPipeline && hasSelectedItem && hasPdfForPipeline;
+        const message = pipelineRequest.enabled ? pipelineRequest.message : rawMessage;
+
+        if (explicitPipeline && !hasSelectedItem) {
+          this.showToast(
+            this.aiLanguage === 'en'
+              ? 'Select an item first to run the big PDF pipeline'
+              : 'Büyük PDF pipeline için önce bir öğe seçin'
+          );
+          return;
+        }
+        if (explicitPipeline && hasSelectedItem && !hasPdfForPipeline) {
+          pipelineEnabled = false;
+          this.showToast(
+            this.aiLanguage === 'en'
+              ? 'Full-text PDF is not available for this item. Continuing with context mode.'
+              : 'Bu öğe için tam metin PDF bulunamadı. Bağlam modunda devam ediliyor.'
+          );
+        }
+
         this.chatInput = '';
         const supportsMcp = this.providerSupportsMcp();
 
         let prompt = message;
         if (this.selectedItem) {
-          const context = this.buildContext();
-          if (this.aiLanguage === 'en') {
-            if (supportsMcp) {
-              prompt = `About "${this.selectedItem.data.title}" (key: ${this.selectedItem.key}) in my Zotero library: ${message}. Use Zotero MCP tools when needed. If tool access is unavailable, continue with the provided context and clearly label missing parts. Respond in English.\n\nZotero context:\n${context}`;
+          if (pipelineEnabled) {
+            if (this.aiLanguage === 'en') {
+              prompt = `For "${this.selectedItem.data.title}" (key: ${this.selectedItem.key}) in my Zotero library, run BIG PDF PIPELINE mode. User request: ${message}. Use full-text chunking and section-level synthesis. Respond in English and stay grounded in source text.`;
             } else {
-              prompt = `About "${this.selectedItem.data.title}" (key: ${this.selectedItem.key}) in my Zotero library: ${message}. Use ONLY the provided Zotero context (metadata/abstract/notes), do not claim external tool access, and clearly label missing information. Respond in English.\n\nZotero context:\n${context}`;
+              prompt = `Zotero kütüphanesindeki "${this.selectedItem.data.title}" (key: ${this.selectedItem.key}) için BÜYÜK PDF PIPELINE modunu çalıştır. Kullanıcı isteği: ${message}. Tam metni parçalara bölüp bölüm bazlı sentez yap. Türkçe yanıtla ve yalnızca kaynak metne dayan.`;
             }
           } else {
-            if (supportsMcp) {
-              prompt = `Zotero kütüphanesimdeki "${this.selectedItem.data.title}" (key: ${this.selectedItem.key}) çalışması hakkında: ${message}. Gerekirse Zotero MCP araçlarını kullan. Araçlara erişim yoksa verilen bağlamla devam et ve eksikleri açıkça belirt. Türkçe yanıtla.\n\nZotero bağlamı:\n${context}`;
+            const context = this.buildContext();
+            if (this.aiLanguage === 'en') {
+              if (supportsMcp) {
+                prompt = `About "${this.selectedItem.data.title}" (key: ${this.selectedItem.key}) in my Zotero library: ${message}. Use Zotero MCP tools when needed. If tool access is unavailable, continue with the provided context and clearly label missing parts. Respond in English.\n\nZotero context:\n${context}`;
+              } else {
+                prompt = `About "${this.selectedItem.data.title}" (key: ${this.selectedItem.key}) in my Zotero library: ${message}. Use ONLY the provided Zotero context (metadata/abstract/notes), do not claim external tool access, and clearly label missing information. Respond in English.\n\nZotero context:\n${context}`;
+              }
             } else {
-              prompt = `Zotero kütüphanesimdeki "${this.selectedItem.data.title}" (key: ${this.selectedItem.key}) çalışması hakkında: ${message}. SADECE verilen Zotero bağlamını (metadata/özet/notlar) kullan; dış araç erişimi varmış gibi davranma; eksikleri açıkça belirt. Türkçe yanıtla.\n\nZotero bağlamı:\n${context}`;
+              if (supportsMcp) {
+                prompt = `Zotero kütüphanesimdeki "${this.selectedItem.data.title}" (key: ${this.selectedItem.key}) çalışması hakkında: ${message}. Gerekirse Zotero MCP araçlarını kullan. Araçlara erişim yoksa verilen bağlamla devam et ve eksikleri açıkça belirt. Türkçe yanıtla.\n\nZotero bağlamı:\n${context}`;
+              } else {
+                prompt = `Zotero kütüphanesimdeki "${this.selectedItem.data.title}" (key: ${this.selectedItem.key}) çalışması hakkında: ${message}. SADECE verilen Zotero bağlamını (metadata/özet/notlar) kullan; dış araç erişimi varmış gibi davranma; eksikleri açıkça belirt. Türkçe yanıtla.\n\nZotero bağlamı:\n${context}`;
+              }
             }
           }
           prompt = this.applyAnalysisModeToPrompt(prompt, supportsMcp);
+          if (!pipelineEnabled) {
+            prompt = this.applyTemplateDirectiveToPrompt(prompt);
+          }
         } else if (this.aiLanguage === 'en') {
           prompt = `${message}. Respond in English.\n\n${this.outputConstraintDirective(false)}`;
         } else {
@@ -1102,7 +1617,12 @@
 
         this.chatMessages.push({ role: 'user', content: prompt, display: message });
         this.persistChatForCurrentItem();
-        await this._sendToApi(prompt);
+        await this._sendToApi(prompt, {
+          bigPdfPipeline: pipelineEnabled,
+          bigPdfQuery: message,
+          pipelineTemplate: this.pipelineTemplate,
+          pipelineChunkLimit: this.pipelineChunkLimit,
+        });
       },
 
       stopChatRequest() {
@@ -1303,7 +1823,7 @@
         }
       },
 
-      async _sendToApi(prompt) {
+      async _sendToApi(prompt, options = {}) {
         this.chatLoading = true;
         this.chatAbortController = new AbortController();
         this.chatError = '';
@@ -1320,6 +1840,7 @@
           this.compareChatActive && Array.isArray(this.compareChatKeys)
             ? this.compareChatKeys.slice(0, 6)
             : [];
+        const requestItemApiBase = this.selectedItem ? this.zoteroItemApiBase(this.selectedItem) : this.zoteroItemApiBase(null);
         const requestBody = {
           prompt,
           provider: this.aiProvider,
@@ -1327,7 +1848,13 @@
           analysisMode: this.aiAnalysisMode || 'balanced',
           language: this.aiLanguage || 'tr',
           itemKey: requestItemKey,
+          itemApiBase: requestItemApiBase,
           compareKeys: requestCompareKeys,
+          contextKeys: this.aiContextSelectedItems().map((item) => item.key).slice(0, this.aiContextSelectionLimit() + 1),
+          bigPdfPipeline: !!options.bigPdfPipeline,
+          bigPdfQuery: String(options.bigPdfQuery || '').trim(),
+          pipelineTemplate: this.normalizePipelineTemplate(options.pipelineTemplate || this.pipelineTemplate),
+          pipelineChunkLimit: this.normalizePipelineChunkLimit(options.pipelineChunkLimit || this.pipelineChunkLimit),
         };
 
         try {

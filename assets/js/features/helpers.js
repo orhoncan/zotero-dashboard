@@ -11,14 +11,97 @@
       renderMd(text) {
         if (!text) return "";
         try {
-          return marked.parse(text);
+          const rendered = marked.parse(text);
+          return this.sanitizeHtml(rendered, { context: 'markdown' });
         } catch (e) {
-          return text;
+          const escaped = this.escapeHtml(text);
+          return this.sanitizeHtml(escaped, { context: 'markdown' });
         }
+      },
+
+      escapeHtml(value) {
+        return String(value || '')
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&#39;');
+      },
+
+      sanitizeHtml(raw, options = {}) {
+        const html = String(raw || '');
+        if (!html) return '';
+
+        const purifier = window.DOMPurify;
+        if (!purifier || typeof purifier.sanitize !== 'function') {
+          return this.escapeHtml(html);
+        }
+
+        const context = options.context || 'default';
+        const allowSvg = !!options.allowSvg;
+        const baseConfig = {
+          USE_PROFILES: allowSvg ? { html: true, svg: true, svgFilters: false } : { html: true },
+          ALLOW_DATA_ATTR: false,
+          FORBID_TAGS: ['script', 'style', 'iframe', 'object', 'embed', 'link', 'meta', 'form'],
+          FORBID_ATTR: ['onerror', 'onload', 'onclick', 'onmouseover', 'onfocus', 'onmouseenter'],
+          ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto|doi|zotero):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i,
+        };
+
+        if (context === 'markdown') {
+          baseConfig.ALLOWED_TAGS = [
+            'a', 'p', 'div', 'span', 'strong', 'em', 'b', 'i', 'u', 's',
+            'ul', 'ol', 'li', 'blockquote', 'code', 'pre',
+            'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+            'table', 'thead', 'tbody', 'tr', 'th', 'td',
+            'hr', 'br',
+          ];
+          baseConfig.ALLOWED_ATTR = ['href', 'title', 'target', 'rel', 'class'];
+        } else {
+          baseConfig.ALLOWED_TAGS = [
+            'a', 'p', 'div', 'span', 'strong', 'em', 'b', 'i', 'u', 's',
+            'ul', 'ol', 'li', 'blockquote', 'code', 'pre', 'hr', 'br',
+          ];
+          baseConfig.ALLOWED_ATTR = ['href', 'title', 'target', 'rel', 'class'];
+        }
+
+        const clean = purifier.sanitize(html, baseConfig);
+        if (!clean) return '';
+
+        const wrap = document.createElement('div');
+        wrap.innerHTML = clean;
+        wrap.querySelectorAll('a').forEach((anchor) => {
+          anchor.setAttribute('rel', 'noopener noreferrer');
+          if (!anchor.getAttribute('target')) {
+            anchor.setAttribute('target', '_blank');
+          }
+        });
+        return wrap.innerHTML;
+      },
+
+      renderNoteHtml(noteHtml) {
+        return this.sanitizeHtml(noteHtml, { context: 'note' });
       },
 
       getCollectionName(key) {
         return this.collections.find((c) => c.key === key)?.data.name || key;
+      },
+
+      rememberItems(items) {
+        if (!Array.isArray(items) || !items.length) return;
+        const next = { ...(this.itemCacheByKey || {}) };
+        items.forEach((item) => {
+          if (!item?.key) return;
+          next[item.key] = item;
+        });
+        this.itemCacheByKey = next;
+      },
+
+      findItemByKey(key) {
+        const normalized = String(key || '').trim();
+        if (!normalized) return null;
+        const live = (this.items || []).find((item) => item?.key === normalized);
+        if (live) return live;
+        return this.itemCacheByKey?.[normalized] || null;
       },
 
       formatAuthors(creators) {

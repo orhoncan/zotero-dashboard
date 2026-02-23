@@ -1,0 +1,9 @@
+    <!-- Tab bar: Detay / AI Chat -->
+    <div class="flex border-b border-slate-700/50 shrink-0" x-show="selectedItem">
+      <button @click="detailTab='info'" :class="detailTab==='info' ? 'border-b-2 border-red-500 text-white' : 'text-slate-400'"
+        class="flex-1 text-xs font-medium py-2.5 text-center transition"
+        x-text="aiLanguage === 'en' ? 'Details' : 'Detay'"></button>
+      <button @click="detailTab='chat'" :class="detailTab==='chat' ? 'border-b-2 border-red-500 text-white' : 'text-slate-400'"
+        class="flex-1 text-xs font-medium py-2.5 text-center transition"
+        x-text="aiLanguage === 'en' ? 'AI Analysis' : 'AI Analiz'"></button>
+    </div>

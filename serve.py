@@ -122,6 +122,10 @@ PROVIDER_CIRCUIT_COOLDOWN_SECONDS = {
     "unavailable": 240,
     "error": 120,
 }
+try:
+    MAX_SERVER_WORKERS = max(4, int(str(os.environ.get("SERVER_MAX_WORKERS", "24")).strip() or "24"))
+except Exception:
+    MAX_SERVER_WORKERS = 24
 
 class Handler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
@@ -822,15 +826,77 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         content_type, _ = mimetypes.guess_type(full_path)
         content_type = content_type or 'application/octet-stream'
         try:
-            with open(full_path, 'rb') as f:
-                data = f.read()
-            self.send_response(200)
+            file_size = os.path.getsize(full_path)
+            if file_size <= 0:
+                self.send_response(200)
+                self.send_header('Content-Type', content_type)
+                self.send_header('Content-Length', '0')
+                self.send_header('Accept-Ranges', 'bytes')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.send_header('Content-Disposition', 'inline')
+                self.end_headers()
+                return
+            range_header = str(self.headers.get('Range', '') or '').strip()
+
+            start = 0
+            end = max(0, file_size - 1)
+            status = 200
+
+            if range_header.startswith("bytes="):
+                m = re.match(r"^bytes=(\d*)-(\d*)$", range_header)
+                if m:
+                    start_raw, end_raw = m.group(1), m.group(2)
+                    if start_raw == "" and end_raw == "":
+                        m = None
+                    else:
+                        try:
+                            if start_raw == "":
+                                # Suffix range: bytes=-N
+                                suffix = int(end_raw)
+                                if suffix > 0:
+                                    start = max(0, file_size - suffix)
+                            else:
+                                start = int(start_raw)
+                            if end_raw != "":
+                                end = int(end_raw)
+                            else:
+                                end = file_size - 1
+                            start = max(0, min(start, file_size - 1))
+                            end = max(start, min(end, file_size - 1))
+                            status = 206
+                        except Exception:
+                            m = None
+                if not m:
+                    self.send_response(416)
+                    self.send_header('Content-Range', f'bytes */{file_size}')
+                    self.send_header('Access-Control-Allow-Origin', '*')
+                    self.end_headers()
+                    return
+
+            content_length = max(0, (end - start) + 1)
+            self.send_response(status)
             self.send_header('Content-Type', content_type)
-            self.send_header('Content-Length', str(len(data)))
+            self.send_header('Content-Length', str(content_length))
+            self.send_header('Accept-Ranges', 'bytes')
+            if status == 206:
+                self.send_header('Content-Range', f'bytes {start}-{end}/{file_size}')
             self.send_header('Access-Control-Allow-Origin', '*')
             self.send_header('Content-Disposition', 'inline')
             self.end_headers()
-            self.wfile.write(data)
+
+            chunk_size = 64 * 1024
+            remaining = content_length
+            with open(full_path, 'rb') as f:
+                f.seek(start)
+                while remaining > 0:
+                    data = f.read(min(chunk_size, remaining))
+                    if not data:
+                        break
+                    try:
+                        self.wfile.write(data)
+                    except (BrokenPipeError, ConnectionResetError):
+                        break
+                    remaining -= len(data)
         except Exception as e:
             self.send_error(500, str(e))
 
@@ -899,7 +965,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         target = self.normalize_output_language(target_language)
         if not target:
             return True
-        return self.language_compliance_score(text, target) >= 0.56
+        threshold = 0.60
+        if target == "tr":
+            threshold = 0.68
+        return self.language_compliance_score(text, target) >= threshold
 
     def language_rewrite_prompt(self, text, target_language):
         target = self.normalize_output_language(target_language)
@@ -911,14 +980,58 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 "Rewrite the text below strictly in natural English. "
                 "Preserve meaning exactly, keep factual content unchanged, do not add new information, "
                 "do not remove important details, and avoid Turkish words unless they are unavoidable proper nouns.\n\n"
+                "Do not include process narration such as 'I now have enough content' or 'I will now produce the output'.\n\n"
                 f"Text:\n{content}"
             )
         return (
             "Aşağıdaki metni sadece doğal Türkçe ile yeniden yaz. "
             "Anlamı birebir koru, olgusal içeriği değiştirme, yeni bilgi ekleme, önemli ayrıntıları silme, "
-            "zorunlu özel adlar dışında yabancı kelime kullanma.\n\n"
+            "zorunlu özel adlar dışında yabancı kelime kullanma. "
+            "Türkçe karakterleri doğru kullan (ç, ğ, ı, İ, ö, ş, ü). "
+            "Yana not/süreç cümlesi yazma (ör. 'Yeterli içerik elde ettim', 'Çıktıyı şimdi üretiyorum').\n\n"
             f"Metin:\n{content}"
         )
+
+    def process_meta_prefixes(self):
+        return [
+            "yeterli içerik elde ettim",
+            "yeterli bağlam elde ettim",
+            "çıktıyı şimdi üretiyorum",
+            "çıktıyı şimdi hazırlıyorum",
+            "şimdi çıktıyı üretiyorum",
+            "şimdi çıktıyı hazırlıyorum",
+            "i now have enough content",
+            "i now have enough context",
+            "i will now produce the output",
+            "i will now generate the output",
+            "now generating the output",
+            "now producing the output",
+        ]
+
+    def is_process_meta_line(self, text):
+        candidate = str(text or "").strip().lower()
+        if not candidate:
+            return False
+
+        if any(candidate.startswith(prefix) for prefix in self.process_meta_prefixes()):
+            return True
+
+        patterns = [
+            r"^yeterli .* (elde ettim|topladım)",
+            r"^çıktıyı şimdi .*",
+            r"^şimdi .*çıktı.*",
+            r"^i (now )?(have|got) enough (content|context)",
+            r"^i will now (produce|generate|prepare) (the )?output",
+            r"^now (producing|generating|preparing) (the )?output",
+        ]
+        return any(re.search(pattern, candidate) for pattern in patterns)
+
+    def is_process_meta_prefix(self, text):
+        candidate = str(text or "").strip().lower()
+        if not candidate:
+            return False
+        prefixes = self.process_meta_prefixes()
+        return any(prefix.startswith(candidate) or candidate.startswith(prefix) for prefix in prefixes)
 
     def sanitize_provider_output(self, text, provider):
         content = str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
@@ -959,6 +1072,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         for line in lines:
             if not line:
                 continue
+            if self.is_process_meta_line(line):
+                continue
             lowered = line.lower()
             if normalized_provider == "gemini":
                 if any(re.search(pattern, lowered) for pattern in gemini_noise):
@@ -969,8 +1084,6 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             cleaned_lines.append(line)
 
         cleaned = "\n".join(cleaned_lines).strip()
-        if not cleaned:
-            return content
         return cleaned
 
     def provider_noise_prefixes(self, provider):
@@ -1006,6 +1119,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         candidate = str(line or "").strip()
         if not candidate:
             return False
+        if self.is_process_meta_line(candidate):
+            return True
         lowered = candidate.lower()
         normalized_provider = self.normalize_provider(provider)
 
@@ -1049,6 +1164,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         candidate = str(text or "").strip().lower()
         if not candidate:
             return False
+        if self.is_process_meta_prefix(candidate):
+            return True
         prefixes = self.provider_noise_prefixes(provider)
         return any(prefix.startswith(candidate) or candidate.startswith(prefix) for prefix in prefixes)
 
@@ -1072,7 +1189,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         remainder = state.get("buffer", "")
         if remainder:
             if direct_mode:
-                emitted.append(remainder)
+                if not self.is_noise_output_line(remainder, provider):
+                    emitted.append(remainder)
                 state["buffer"] = ""
             elif len(remainder) >= 28 and (not self.is_noise_output_prefix(remainder, provider)):
                 emitted.append(remainder)
@@ -1187,6 +1305,682 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return candidate
         return ""
 
+    def normalize_item_api_base(self, raw_base):
+        candidate = str(raw_base or "").strip()
+        if not candidate:
+            return "/api/users/0"
+
+        if candidate.startswith("http://") or candidate.startswith("https://"):
+            try:
+                parsed = urllib.parse.urlparse(candidate)
+                candidate = parsed.path or ""
+            except Exception:
+                candidate = ""
+
+        candidate = candidate.rstrip("/")
+        candidate = re.sub(r"(/items/.*)$", "", candidate, flags=re.IGNORECASE)
+        if re.fullmatch(r"/api/(users|groups)/\d+", candidate):
+            return candidate
+        if re.fullmatch(r"/(users|groups)/\d+", candidate):
+            return f"/api{candidate}"
+        return "/api/users/0"
+
+    def should_fallback_from_pipeline_error(self, error):
+        message = str(error or "").lower()
+        if not message:
+            return False
+        keywords = [
+            "tam metni bulunamadı",
+            "fulltext",
+            "full text",
+            "indekslenmemiş",
+            "zotero api 404",
+            "not found",
+        ]
+        return any(token in message for token in keywords)
+
+    def item_api_base_candidates(self, req_data):
+        provided = self.normalize_item_api_base((req_data or {}).get("itemApiBase", ""))
+        candidates = [provided]
+        if provided != "/api/users/0":
+            candidates.append("/api/users/0")
+        deduped = []
+        for base in candidates:
+            if base and base not in deduped:
+                deduped.append(base)
+        return deduped
+
+    def as_bool(self, value):
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value != 0
+        normalized = str(value or "").strip().lower()
+        return normalized in {"1", "true", "yes", "on", "evet"}
+
+    def is_big_pdf_pipeline_requested(self, req_data):
+        return self.as_bool((req_data or {}).get("bigPdfPipeline", False))
+
+    def normalize_big_pdf_query(self, req_data, fallback_prompt="", target_language=""):
+        query = str((req_data or {}).get("bigPdfQuery", "")).strip()
+        if query:
+            return query
+        prompt_fallback = str(fallback_prompt or "").strip()
+        if prompt_fallback:
+            return prompt_fallback
+        if self.normalize_output_language(target_language) == "en":
+            return "Analyze the full PDF in detail."
+        return "PDF'nin tamamını ayrıntılı analiz et."
+
+    def normalize_pipeline_template(self, raw_template):
+        allowed = {"study", "presentation", "review", "thesis_notes", "policy_brief"}
+        candidate = str(raw_template or "").strip().lower()
+        return candidate if candidate in allowed else "study"
+
+    def normalize_pipeline_chunk_limit(self, raw_limit):
+        candidate = str(raw_limit or "").strip().lower()
+        if candidate in {"", "auto", "default"}:
+            return 0
+        try:
+            parsed = int(candidate)
+        except Exception:
+            return 0
+        if parsed < 2:
+            return 0
+        return min(16, parsed)
+
+    def has_pipeline_citations(self, text, target_language):
+        content = str(text or "")
+        lang = self.normalize_output_language(target_language)
+        if lang == "en":
+            return bool(
+                re.search(r"\[Chunk\s*\d+\]", content, flags=re.IGNORECASE)
+                or re.search(r"\((Source|Sources)\s*:\s*\d+", content, flags=re.IGNORECASE)
+            )
+        return bool(
+            re.search(r"\[Parça\s*\d+\]", content, flags=re.IGNORECASE)
+            or re.search(r"\(Kaynak\s*:\s*\d+", content, flags=re.IGNORECASE)
+        )
+
+    def format_pipeline_citations_for_users(self, text, target_language):
+        content = str(text or "")
+        if not content:
+            return content
+
+        lang = self.normalize_output_language(target_language)
+        source_label = "Sources" if lang == "en" else "Kaynak"
+
+        # Normalize bracket tags such as [Parça6] or [Chunk6] into a consistent form.
+        normalized = re.sub(r"\[(Parça|Chunk)\s*(\d+)\]", r"[\1 \2]", content, flags=re.IGNORECASE)
+
+        # Convert dense tag chains like [Parça 2][Parça 5] into a reader-friendly source note.
+        chain_pattern = re.compile(r"(?:\[(?:Parça|Chunk)\s*\d+\]\s*)+", flags=re.IGNORECASE)
+
+        def replace_chain(match):
+            raw = match.group(0)
+            nums = re.findall(r"\d+", raw)
+            ordered_unique = []
+            seen = set()
+            for num in nums:
+                if num in seen:
+                    continue
+                seen.add(num)
+                ordered_unique.append(num)
+            if not ordered_unique:
+                return raw
+            return f"({source_label}: {', '.join(ordered_unique)})"
+
+        return chain_pattern.sub(replace_chain, normalized)
+
+    def big_pdf_pipeline_config(self, analysis_mode):
+        mode = self.normalize_analysis_mode(analysis_mode)
+        if mode == "fast":
+            return {
+                "chunk_size": 5200,
+                "chunk_overlap": 320,
+                "max_chunks": 4,
+                "max_source_chars": 5200 * 5,
+                "chunk_analysis_mode": "fast",
+            }
+        if mode == "deep":
+            return {
+                "chunk_size": 7600,
+                "chunk_overlap": 520,
+                "max_chunks": 12,
+                "max_source_chars": 7600 * 13,
+                "chunk_analysis_mode": "balanced",
+            }
+        return {
+            "chunk_size": 6400,
+            "chunk_overlap": 420,
+            "max_chunks": 8,
+            "max_source_chars": 6400 * 9,
+            "chunk_analysis_mode": "balanced",
+        }
+
+    def pipeline_template_instruction(self, template, target_language):
+        lang = self.normalize_output_language(target_language)
+        normalized = self.normalize_pipeline_template(template)
+        if lang == "en":
+            mapping = {
+                "study": (
+                    "Template: STUDY NOTE.\n"
+                    "Sections: (1) Structured summary, (2) Concepts and definitions, (3) Method and evidence, "
+                    "(4) Key findings, (5) Limits, (6) Exam/study checklist."
+                ),
+                "presentation": (
+                    "Template: PRESENTATION.\n"
+                    "Sections: (1) Slide-by-slide outline (8-12 slides), (2) Speaker notes, "
+                    "(3) Visual suggestions per slide, (4) Q&A prep."
+                ),
+                "review": (
+                    "Template: PEER REVIEW.\n"
+                    "Sections: (1) Summary for editor, (2) Major comments, (3) Minor comments, "
+                    "(4) Recommendation with justification."
+                ),
+                "thesis_notes": (
+                    "Template: RESEARCH NOTES.\n"
+                    "Sections: (1) Literature placement, (2) Reusable argument blocks, (3) Methods relevance, "
+                    "(4) Citation-ready notes, (5) Research gap map."
+                ),
+                "policy_brief": (
+                    "Template: POLICY BRIEF.\n"
+                    "Sections: (1) Problem framing, (2) Evidence highlights, (3) Policy options, "
+                    "(4) Risks and tradeoffs, (5) Action roadmap."
+                ),
+            }
+            return mapping.get(normalized, mapping["study"])
+
+        mapping = {
+            "study": (
+                "Şablon: ÇALIŞMA NOTU.\n"
+                "Bölümler: (1) Yapılandırılmış özet, (2) Kavramlar ve tanımlar, (3) Yöntem ve kanıt, "
+                "(4) Temel bulgular, (5) Sınırlılıklar, (6) Sınav/çalışma kontrol listesi."
+            ),
+            "presentation": (
+                "Şablon: SUNUM.\n"
+                "Bölümler: (1) 8-12 slaytlık akış planı, (2) Konuşmacı notları, "
+                "(3) Slayt başına görsel önerisi, (4) Soru-cevap hazırlığı."
+            ),
+            "review": (
+                "Şablon: HAKEM DEĞERLENDİRMESİ.\n"
+                "Bölümler: (1) Editöre kısa özet, (2) Majör yorumlar, (3) Minör yorumlar, "
+                "(4) Gerekçeli karar önerisi."
+            ),
+            "thesis_notes": (
+                "Şablon: ARAŞTIRMA NOTLARI.\n"
+                "Bölümler: (1) Literatürde konumlandırma, (2) Yeniden kullanılabilir argüman blokları, "
+                "(3) Yöntem uygunluğu, (4) Atıfa hazır notlar, (5) Araştırma boşluk haritası."
+            ),
+            "policy_brief": (
+                "Şablon: POLİTİKA ÖZETİ.\n"
+                "Bölümler: (1) Sorun çerçevesi, (2) Kanıt özeti, (3) Politika seçenekleri, "
+                "(4) Riskler ve ödünleşimler, (5) Eylem yol haritası."
+            ),
+        }
+        return mapping.get(normalized, mapping["study"])
+
+    def fetch_zotero_api_json(self, path, timeout=12):
+        normalized_path = str(path or "").strip()
+        if not normalized_path:
+            raise ValueError("Zotero API path is empty")
+        if not normalized_path.startswith("/"):
+            normalized_path = "/" + normalized_path
+
+        cache_profile = self.tool_cache_profile_for_path(normalized_path)
+        cache_key = self.tool_cache_key(normalized_path)
+        if cache_profile:
+            cached = self.get_cached_tool_result(cache_key)
+            if cached:
+                raw_body = cached.get("body", b"")
+                if isinstance(raw_body, str):
+                    raw_body = raw_body.encode("utf-8")
+                payload = raw_body.decode("utf-8", errors="replace").strip()
+                return json.loads(payload) if payload else {}
+
+        url = f"{ZOTERO_API}{normalized_path}"
+        req = urllib.request.Request(url, method="GET")
+        try:
+            with urllib.request.urlopen(req, timeout=max(3, int(timeout or 12))) as resp:
+                raw = resp.read()
+                body_text = raw.decode("utf-8", errors="replace").strip()
+                data = json.loads(body_text) if body_text else {}
+                if cache_profile and int(resp.status) == 200:
+                    headers = {}
+                    for header in ["Content-Type", "Total-Results", "Link", "Last-Modified-Version", "ETag"]:
+                        val = resp.getheader(header)
+                        if val:
+                            headers[header] = val
+                    self.set_cached_tool_result(
+                        cache_key,
+                        {
+                            "status": int(resp.status),
+                            "headers": headers,
+                            "body": raw,
+                        },
+                        cache_profile.get("ttl", 300),
+                    )
+                return data
+        except urllib.error.HTTPError as e:
+            detail = ""
+            try:
+                raw = e.read()
+                text = raw.decode("utf-8", errors="replace").strip()
+                if text:
+                    try:
+                        parsed = json.loads(text)
+                        detail = str(parsed.get("error") or parsed.get("message") or "")
+                    except Exception:
+                        detail = text
+            except Exception:
+                detail = ""
+            raise ValueError(f"Zotero API {e.code}: {detail or normalized_path}")
+        except urllib.error.URLError as e:
+            raise ValueError(f"Zotero API erişilemedi: {e}")
+
+    def extract_fulltext_content(self, payload):
+        candidates = []
+
+        def collect(node):
+            if isinstance(node, str):
+                candidates.append(node)
+                return
+            if isinstance(node, dict):
+                for key in ("content", "fulltext", "fullText", "text", "body", "value"):
+                    value = node.get(key)
+                    if isinstance(value, str):
+                        candidates.append(value)
+                for key in ("data", "result", "payload"):
+                    nested = node.get(key)
+                    if isinstance(nested, (dict, list, str)):
+                        collect(nested)
+                return
+            if isinstance(node, list):
+                for item in node[:20]:
+                    collect(item)
+
+        collect(payload)
+        if not candidates:
+            return ""
+
+        best = max(candidates, key=lambda value: len(str(value or "")))
+        text = str(best or "").replace("\r\n", "\n").replace("\r", "\n")
+        text = re.sub(r"[ \t]+", " ", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip()
+
+    def split_text_for_big_pdf_pipeline(self, text, chunk_size, overlap, max_chunks):
+        content = str(text or "").strip()
+        if not content:
+            return []
+
+        size = max(1200, int(chunk_size or 6400))
+        overlap_len = max(0, min(int(overlap or 0), size // 3))
+        max_chunk_count = max(1, int(max_chunks or 8))
+
+        chunks = []
+        cursor = 0
+        total_len = len(content)
+        while cursor < total_len and len(chunks) < max_chunk_count:
+            end = min(total_len, cursor + size)
+            if end < total_len:
+                para_break = content.rfind("\n\n", cursor + int(size * 0.55), end)
+                sentence_break = content.rfind(". ", cursor + int(size * 0.6), end)
+                split_point = max(para_break, sentence_break)
+                if split_point > cursor + int(size * 0.5):
+                    if split_point == sentence_break:
+                        end = split_point + 1
+                    else:
+                        end = split_point
+
+            chunk = content[cursor:end].strip()
+            if chunk:
+                chunks.append(chunk)
+            if end >= total_len:
+                break
+            cursor = max(cursor + 1, end - overlap_len)
+
+        return chunks
+
+    def build_big_pdf_chunk_prompt(self, item_title, item_key, user_query, chunk_text, chunk_index, chunk_total, target_language):
+        lang = self.normalize_output_language(target_language)
+        if lang == "en":
+            return (
+                f'You are analyzing a large PDF in chunks.\n'
+                f'Document: "{item_title}" (key: {item_key})\n'
+                f'User goal: {user_query}\n'
+                f'Chunk: {chunk_index}/{chunk_total}\n\n'
+                "Rules:\n"
+                "- Use ONLY the chunk text below.\n"
+                "- Do not use outside knowledge.\n"
+                "- If information is missing, state it clearly.\n\n"
+                "Output format:\n"
+                "1) Chunk focus (1 sentence)\n"
+                "2) Key points (4-6 bullets)\n"
+                "3) Methods/data/findings in this chunk (bullets)\n"
+                "4) Why this chunk matters for the user goal (2-3 bullets)\n\n"
+                f"Chunk text:\n{chunk_text}"
+            )
+        return (
+            f'Büyük bir PDF parça parça analiz ediliyor.\n'
+            f'Doküman: "{item_title}" (key: {item_key})\n'
+            f'Kullanıcı hedefi: {user_query}\n'
+            f'Parça: {chunk_index}/{chunk_total}\n\n'
+            "Kurallar:\n"
+            "- SADECE aşağıdaki parça metnini kullan.\n"
+            "- Dış bilgi ekleme.\n"
+            "- Bilgi eksikse açıkça belirt.\n\n"
+            "Çıktı formatı:\n"
+            "1) Parça odağı (1 cümle)\n"
+            "2) Ana noktalar (4-6 madde)\n"
+            "3) Bu parçada geçen yöntem/veri/bulgu (maddeler)\n"
+            "4) Kullanıcı hedefine katkısı (2-3 madde)\n\n"
+            f"Parça metni:\n{chunk_text}"
+        )
+
+    def build_big_pdf_final_prompt(self, item_title, item_key, user_query, chunk_summaries, target_language, template="study"):
+        lang = self.normalize_output_language(target_language)
+        joined = "\n\n".join(chunk_summaries)
+        template_instruction = self.pipeline_template_instruction(template, target_language)
+        if lang == "en":
+            return (
+                f'Using the chunk summaries below, produce a single coherent final analysis for "{item_title}" (key: {item_key}).\n'
+                f'User goal: {user_query}\n\n'
+                "Rules:\n"
+                "- Use ONLY the chunk summaries.\n"
+                "- Keep claims grounded; mark missing or uncertain points.\n\n"
+                f"{template_instruction}\n\n"
+                "Citation rule (MANDATORY): Every factual sentence or bullet MUST end with at least one source tag like [Chunk 3].\n"
+                "If multiple chunks support a claim, use multiple tags such as [Chunk 2][Chunk 5].\n\n"
+                f"Chunk summaries:\n{joined}"
+            )
+        return (
+            f'"{item_title}" (key: {item_key}) için aşağıdaki parça özetlerini birleştirerek tek bir nihai analiz üret.\n'
+            f'Kullanıcı hedefi: {user_query}\n\n'
+            "Kurallar:\n"
+            "- SADECE parça özetlerini kullan.\n"
+            "- İddiaları kaynağa dayandır; eksik/belirsiz noktaları işaretle.\n\n"
+            f"{template_instruction}\n\n"
+            "Kaynak etiketi kuralı (ZORUNLU): Her olgusal cümle veya madde sonuna en az bir kaynak etiketi ekle: [Parça 3].\n"
+            "Aynı iddia birden fazla parçaya dayanıyorsa birden çok etiket kullan: [Parça 2][Parça 5].\n\n"
+            f"Parça özetleri:\n{joined}"
+        )
+
+    def execute_big_pdf_pipeline(self, req_data, fallback_prompt, provider, model, analysis_mode="balanced", output_language="", on_event=None):
+        item_key = self.normalize_item_key((req_data or {}).get("itemKey", ""))
+        if not item_key:
+            raise ValueError("Büyük PDF pipeline için geçerli itemKey gerekli.")
+
+        config = self.big_pdf_pipeline_config(analysis_mode) or {
+            "chunk_size": 6400,
+            "chunk_overlap": 420,
+            "max_chunks": 8,
+            "max_source_chars": 6400 * 9,
+            "chunk_analysis_mode": "balanced",
+        }
+        pipeline_template = self.normalize_pipeline_template((req_data or {}).get("pipelineTemplate", "study"))
+        requested_chunk_limit = self.normalize_pipeline_chunk_limit((req_data or {}).get("pipelineChunkLimit", "auto"))
+        if requested_chunk_limit > 0:
+            config["max_chunks"] = requested_chunk_limit
+        query = self.normalize_big_pdf_query(req_data, fallback_prompt=fallback_prompt, target_language=output_language)
+
+        base_candidates = self.item_api_base_candidates(req_data)
+        metadata = None
+        item_base = ""
+        last_metadata_err = None
+        for base in base_candidates:
+            try:
+                metadata = self.fetch_zotero_api_json(f"{base}/items/{item_key}?format=json", timeout=10)
+                item_base = base
+                break
+            except ValueError as e:
+                if "Zotero API 404" in str(e or ""):
+                    last_metadata_err = e
+                    continue
+                raise
+        if metadata is None:
+            if last_metadata_err:
+                raise ValueError(
+                    "Seçili öğe Zotero API'de bulunamadı (404). Öğeyi yenileyip tekrar deneyin."
+                ) from last_metadata_err
+            raise ValueError("Seçili öğe için metadata alınamadı.")
+        item_title = (
+            str((metadata or {}).get("data", {}).get("title", "")).strip()
+            or f"Item {item_key}"
+        )
+        fulltext = ""
+        try:
+            fulltext_payload = self.fetch_zotero_api_json(f"{item_base}/items/{item_key}/fulltext?format=json", timeout=14)
+            fulltext = self.extract_fulltext_content(fulltext_payload)
+        except ValueError as e:
+            err_msg = str(e or "")
+            if "Zotero API 404" not in err_msg:
+                raise
+
+        # Many libraries expose fulltext at PDF attachment level, not parent item level.
+        if not fulltext:
+            attachment_keys = []
+            try:
+                children = self.fetch_zotero_api_json(f"{item_base}/items/{item_key}/children?format=json", timeout=10)
+                if isinstance(children, list):
+                    for child in children:
+                        if not isinstance(child, dict):
+                            continue
+                        data = child.get("data", {}) if isinstance(child.get("data"), dict) else {}
+                        item_type = str(data.get("itemType", "")).strip().lower()
+                        content_type = str(data.get("contentType", "")).strip().lower()
+                        if item_type != "attachment" or content_type != "application/pdf":
+                            continue
+                        att_key = self.normalize_item_key(child.get("key") or data.get("key"))
+                        if att_key and att_key not in attachment_keys:
+                            attachment_keys.append(att_key)
+            except ValueError:
+                attachment_keys = []
+
+            for attachment_key in attachment_keys[:6]:
+                try:
+                    attachment_fulltext_payload = self.fetch_zotero_api_json(
+                        f"{item_base}/items/{attachment_key}/fulltext?format=json",
+                        timeout=14,
+                    )
+                    candidate_text = self.extract_fulltext_content(attachment_fulltext_payload)
+                    if candidate_text:
+                        fulltext = candidate_text
+                        break
+                except ValueError:
+                    continue
+
+        if not fulltext:
+            raise ValueError("Zotero tam metni bulunamadı. PDF içeriği indekslenmemiş olabilir.")
+
+        source_truncated = False
+        max_source_chars = int(config.get("max_source_chars", 50000))
+        if len(fulltext) > max_source_chars:
+            fulltext = fulltext[:max_source_chars].rstrip()
+            source_truncated = True
+
+        requested_mode = self.normalize_analysis_mode(analysis_mode)
+        chunk_mode = self.normalize_analysis_mode(config.get("chunk_analysis_mode", "balanced"))
+        final_mode = requested_mode
+
+        # Smart speed/cost policy for very long documents: fast chunk pass + balanced synthesis.
+        if len(fulltext) >= 90000 and requested_mode in {"balanced", "deep"}:
+            chunk_mode = "fast"
+            final_mode = "balanced"
+        elif len(fulltext) >= 55000 and requested_mode == "deep":
+            chunk_mode = "fast"
+            final_mode = "balanced"
+
+        chunks = self.split_text_for_big_pdf_pipeline(
+            fulltext,
+            config.get("chunk_size", 6400),
+            config.get("chunk_overlap", 420),
+            config.get("max_chunks", 8),
+        )
+        if not chunks:
+            raise ValueError("Tam metin parçalara ayrılamadı.")
+
+        chunk_summaries = []
+        all_errors = []
+        provider_used = self.normalize_provider(provider)
+        fallback_used = False
+        chunk_tag_label = "Chunk" if self.normalize_output_language(output_language) == "en" else "Parça"
+
+        if on_event:
+            on_event(
+                {
+                    "type": "meta",
+                    "phase": "big_pdf_pipeline_start",
+                    "itemKey": item_key,
+                    "chunkCount": len(chunks),
+                    "analysisMode": analysis_mode,
+                    "chunkMode": chunk_mode,
+                    "finalMode": final_mode,
+                    "template": pipeline_template,
+                    "chunkLimit": int(config.get("max_chunks", 0)),
+                }
+            )
+
+        for idx, chunk_text in enumerate(chunks, start=1):
+            if on_event:
+                on_event(
+                    {
+                        "type": "meta",
+                        "phase": "big_pdf_pipeline_chunk",
+                        "index": idx,
+                        "total": len(chunks),
+                    }
+                )
+
+            chunk_prompt = self.build_big_pdf_chunk_prompt(
+                item_title,
+                item_key,
+                query,
+                chunk_text,
+                idx,
+                len(chunks),
+                output_language,
+            )
+
+            chunk_result = self.execute_with_provider_fallback(
+                chunk_prompt,
+                provider,
+                model,
+                analysis_mode=chunk_mode,
+                stream=False,
+            )
+            chunk_text_out = self.sanitize_provider_output(
+                chunk_result.get("text"),
+                chunk_result.get("providerUsed", provider),
+            )
+            provider_used = self.normalize_provider(chunk_result.get("providerUsed", provider_used))
+            fallback_used = fallback_used or bool(chunk_result.get("fallbackUsed", False))
+
+            errors = chunk_result.get("errors", [])
+            if errors:
+                all_errors.extend([f"chunk-{idx}: {err}" for err in errors[:3]])
+
+            if not chunk_text_out:
+                chunk_text_out = (
+                    "Chunk analysis unavailable due to model/tool error."
+                    if self.normalize_output_language(output_language) == "en"
+                    else "Parça analizi model/araç hatası nedeniyle üretilemedi."
+                )
+            chunk_text_out = chunk_text_out.strip()
+            if len(chunk_text_out) > 1500:
+                chunk_text_out = chunk_text_out[:1500].rstrip() + " ..."
+            chunk_summaries.append(f"[{chunk_tag_label} {idx}/{len(chunks)}]\n{chunk_text_out}")
+
+        final_prompt = self.build_big_pdf_final_prompt(
+            item_title,
+            item_key,
+            query,
+            chunk_summaries,
+            output_language,
+            template=pipeline_template,
+        )
+        final_result = self.execute_with_provider_fallback(
+            final_prompt,
+            provider,
+            model,
+            analysis_mode=final_mode,
+            stream=False,
+        )
+        final_text = self.sanitize_provider_output(
+            final_result.get("text"),
+            final_result.get("providerUsed", provider),
+        )
+        provider_used = self.normalize_provider(final_result.get("providerUsed", provider_used))
+        fallback_used = fallback_used or bool(final_result.get("fallbackUsed", False))
+        final_errors = final_result.get("errors", [])
+        if final_errors:
+            all_errors.extend([f"final: {err}" for err in final_errors[:4]])
+
+        if not final_text:
+            final_text = "\n\n".join(chunk_summaries)
+
+        if not self.has_pipeline_citations(final_text, output_language):
+            citation_lang = self.normalize_output_language(output_language)
+            cite_rewrite_prompt = (
+                "Rewrite the text below by adding citation tags after every factual sentence/bullet. "
+                "Use only these tags: [Chunk n], where n is between 1 and {nmax}. "
+                "Do not change meaning.\n\nText:\n{body}"
+            ) if citation_lang == "en" else (
+                "Aşağıdaki metni, her olgusal cümle/madde sonuna kaynak etiketi ekleyerek yeniden yaz. "
+                "Sadece şu etiketleri kullan: [Parça n], n değeri 1 ile {nmax} arasında olmalı. "
+                "Anlamı değiştirme.\n\nMetin:\n{body}"
+            )
+            rewrite_prompt = cite_rewrite_prompt.format(nmax=len(chunks), body=final_text)
+            cite_result = self.execute_with_provider_fallback(
+                rewrite_prompt,
+                provider_used,
+                model if provider_used == provider else "",
+                analysis_mode="fast",
+                stream=False,
+            )
+            cited = self.sanitize_provider_output(cite_result.get("text"), cite_result.get("providerUsed", provider_used))
+            cite_errors = cite_result.get("errors", [])
+            if cite_errors:
+                all_errors.extend([f"citation-fix: {err}" for err in cite_errors[:2]])
+            if cited and self.has_pipeline_citations(cited, output_language):
+                final_text = cited
+
+        if source_truncated:
+            tail_note = (
+                "\n\nNote: Source text exceeded pipeline limits; only the initial portion was processed."
+                if self.normalize_output_language(output_language) == "en"
+                else "\n\nNot: Kaynak metin pipeline limitini aştığı için sadece ilk bölüm işlendi."
+            )
+            final_text = f"{final_text.rstrip()}{tail_note}"
+
+        final_text = self.format_pipeline_citations_for_users(final_text, output_language)
+
+        if on_event:
+            on_event(
+                {
+                    "type": "meta",
+                    "phase": "big_pdf_pipeline_done",
+                    "chunkCount": len(chunks),
+                    "truncated": source_truncated,
+                    "chunkMode": chunk_mode,
+                    "finalMode": final_mode,
+                    "template": pipeline_template,
+                }
+            )
+
+        return {
+            "text": final_text,
+            "providerUsed": provider_used,
+            "fallbackUsed": fallback_used,
+            "errors": all_errors,
+            "pipelineUsed": True,
+            "pipelineChunks": len(chunks),
+            "pipelineTruncated": source_truncated,
+            "pipelineTemplate": pipeline_template,
+            "pipelineChunkMode": chunk_mode,
+            "pipelineFinalMode": final_mode,
+        }
+
     def build_ai_cache_scope(self, req_data, prompt):
         item_key = self.normalize_item_key((req_data or {}).get("itemKey", ""))
 
@@ -1219,11 +2013,18 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
     def build_ai_response_cache_key(self, req_data, prompt, provider, model, analysis_mode):
         scope = self.build_ai_cache_scope(req_data, prompt)
+        base_token = self.normalize_item_api_base((req_data or {}).get("itemApiBase", "")).replace("/api/", "").replace("/", "-")
         mode_token = self.normalize_analysis_mode(analysis_mode)
         provider_token = self.normalize_provider(provider)
         model_token = str(model or "").strip().lower() or "default"
         prompt_hash = hashlib.sha256(str(prompt or "").encode("utf-8")).hexdigest()[:24]
-        return f"{scope}|{provider_token}|{model_token}|{mode_token}|{prompt_hash}"
+        if self.is_big_pdf_pipeline_requested(req_data):
+            template = self.normalize_pipeline_template((req_data or {}).get("pipelineTemplate", "study"))
+            chunk_limit = self.normalize_pipeline_chunk_limit((req_data or {}).get("pipelineChunkLimit", "auto"))
+            pipeline_token = f"bp2:{template}:{chunk_limit or 'auto'}"
+        else:
+            pipeline_token = "std"
+        return f"{scope}|{base_token}|{provider_token}|{model_token}|{mode_token}|{pipeline_token}|{prompt_hash}"
 
     def ai_response_cache_ttl_seconds(self, analysis_mode):
         mode = self.normalize_analysis_mode(analysis_mode)
@@ -1835,6 +2636,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     on_chunk(chunk)
             else:
                 stderr_parts.append(chunk)
+                if on_chunk:
+                    on_chunk(chunk)
 
         for t in threads:
             t.join(timeout=0.2)
@@ -1978,7 +2781,35 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         )
         if rewritten and self.is_language_compliant(rewritten, target):
             return rewritten, True, rewrite_result.get("errors", [])
-        return output, False, rewrite_result.get("errors", [])
+
+        rewrite_errors = list(rewrite_result.get("errors", []) or [])
+        if target == "tr":
+            fallback_source = rewritten or output
+            strict_prompt = (
+                "Aşağıdaki metni doğal ve akıcı Türkçe ile SON KEZ düzelt. "
+                "Anlamı koru, bilgi ekleme/çıkarma yapma. "
+                "Türkçe dilbilgisi ve noktalamaya tam uy. "
+                "Türkçe karakterleri doğru kullan (ç, ğ, ı, İ, ö, ş, ü). "
+                "Süreç anlatımı yazma (ör. 'Yeterli içerik elde ettim', 'Çıktıyı şimdi üretiyorum').\n\n"
+                f"Metin:\n{fallback_source}"
+            )
+            second_result = self.execute_with_provider_fallback(
+                strict_prompt,
+                requested_provider,
+                requested_model,
+                analysis_mode=analysis_mode,
+                stream=False,
+            )
+            second_rewritten = self.sanitize_provider_output(
+                second_result.get("text"),
+                second_result.get("providerUsed", requested_provider),
+            )
+            if second_rewritten and self.is_language_compliant(second_rewritten, target):
+                combined_errors = rewrite_errors + list(second_result.get("errors", []) or [])
+                return second_rewritten, True, combined_errors
+            rewrite_errors = rewrite_errors + list(second_result.get("errors", []) or [])
+
+        return output, False, rewrite_errors
 
     def run_claude(self):
         """Run selected AI CLI with the user's prompt."""
@@ -1995,6 +2826,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         model = str(req_data.get("model", "")).strip()
         analysis_mode = self.normalize_analysis_mode(req_data.get("analysisMode", "balanced"))
         output_language = self.normalize_output_language(req_data.get("language", ""))
+        pipeline_requested = self.is_big_pdf_pipeline_requested(req_data)
 
         if not prompt:
             self.send_json(400, {"error": "No prompt provided"})
@@ -2012,6 +2844,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     "providerUsed": cached.get("providerUsed", provider),
                     "fallbackUsed": bool(cached.get("fallbackUsed", False)),
                     "languageAdjusted": bool(cached.get("languageAdjusted", False)),
+                    "pipelineUsed": bool(cached.get("pipelineUsed", False)),
+                    "pipelineTemplate": cached.get("pipelineTemplate", ""),
+                    "pipelineChunkMode": cached.get("pipelineChunkMode", ""),
+                    "pipelineFinalMode": cached.get("pipelineFinalMode", ""),
                     "cached": True,
                     "cacheTtlSec": ttl_left,
                     "deduped": False,
@@ -2041,17 +2877,43 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         status = 500
         payload = {"error": "Bilinmeyen hata", "provider": provider}
         try:
-            run_result = self.execute_with_provider_fallback(
-                prompt,
-                provider,
-                model,
-                analysis_mode=analysis_mode,
-                stream=False,
-            )
+            if not pipeline_requested:
+                run_result = self.execute_with_provider_fallback(
+                    prompt,
+                    provider,
+                    model,
+                    analysis_mode=analysis_mode,
+                    stream=False,
+                )
+            else:
+                try:
+                    run_result = self.execute_big_pdf_pipeline(
+                        req_data,
+                        fallback_prompt=prompt,
+                        provider=provider,
+                        model=model,
+                        analysis_mode=analysis_mode,
+                        output_language=output_language,
+                    )
+                except ValueError as e:
+                    if not self.should_fallback_from_pipeline_error(e):
+                        raise
+                    run_result = self.execute_with_provider_fallback(
+                        prompt,
+                        provider,
+                        model,
+                        analysis_mode=analysis_mode,
+                        stream=False,
+                    )
+                    run_result["pipelineUsed"] = False
+                    existing_errors = list(run_result.get("errors", []) or [])
+                    existing_errors.append(f"pipeline-fallback: {str(e)}")
+                    run_result["errors"] = existing_errors
             response_text = run_result.get("text")
             errors = run_result.get("errors", [])
             provider_used = self.normalize_provider(run_result.get("providerUsed", provider))
             fallback_used = bool(run_result.get("fallbackUsed", False))
+            pipeline_used = bool(run_result.get("pipelineUsed", False))
             response_text = self.sanitize_provider_output(response_text, provider_used)
 
             if not response_text:
@@ -2067,6 +2929,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     "provider": provider,
                     "providerUsed": provider_used,
                     "fallbackUsed": fallback_used,
+                    "pipelineUsed": pipeline_used,
                 }
                 if status == 429:
                     payload["code"] = "RATE_LIMIT"
@@ -2109,6 +2972,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         "providerUsed": provider_used,
                         "fallbackUsed": fallback_used,
                         "languageAdjusted": language_adjusted,
+                        "pipelineUsed": pipeline_used,
+                        "pipelineTemplate": run_result.get("pipelineTemplate", ""),
+                        "pipelineChunkMode": run_result.get("pipelineChunkMode", ""),
+                        "pipelineFinalMode": run_result.get("pipelineFinalMode", ""),
                     },
                     self.ai_response_cache_ttl_seconds(analysis_mode),
                 )
@@ -2120,6 +2987,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 "providerUsed": provider_used,
                 "fallbackUsed": fallback_used,
                 "languageAdjusted": language_adjusted,
+                "pipelineUsed": pipeline_used,
+                "pipelineTemplate": run_result.get("pipelineTemplate", ""),
+                "pipelineChunkMode": run_result.get("pipelineChunkMode", ""),
+                "pipelineFinalMode": run_result.get("pipelineFinalMode", ""),
                 "cached": False,
                 "deduped": False,
             }
@@ -2145,6 +3016,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         model = str(req_data.get("model", "")).strip()
         analysis_mode = self.normalize_analysis_mode(req_data.get("analysisMode", "balanced"))
         output_language = self.normalize_output_language(req_data.get("language", ""))
+        pipeline_requested = self.is_big_pdf_pipeline_requested(req_data)
 
         if not prompt:
             self.send_json(400, {"error": "No prompt provided"})
@@ -2198,6 +3070,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     "providerUsed": cached.get("providerUsed", provider),
                     "fallbackUsed": bool(cached.get("fallbackUsed", False)),
                     "languageAdjusted": bool(cached.get("languageAdjusted", False)),
+                    "pipelineUsed": bool(cached.get("pipelineUsed", False)),
+                    "pipelineTemplate": cached.get("pipelineTemplate", ""),
+                    "pipelineChunkMode": cached.get("pipelineChunkMode", ""),
+                    "pipelineFinalMode": cached.get("pipelineFinalMode", ""),
                     "cached": True,
                     "cacheTtlSec": ttl_left,
                     "deduped": False,
@@ -2269,15 +3145,50 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             emit(event_payload)
 
         try:
-            run_result = self.execute_with_provider_fallback(
-                prompt,
-                provider,
-                model,
-                analysis_mode=analysis_mode,
-                stream=True,
-                on_chunk=on_chunk,
-                on_event=on_event,
-            )
+            if not pipeline_requested:
+                run_result = self.execute_with_provider_fallback(
+                    prompt,
+                    provider,
+                    model,
+                    analysis_mode=analysis_mode,
+                    stream=True,
+                    on_chunk=on_chunk,
+                    on_event=on_event,
+                )
+            else:
+                try:
+                    run_result = self.execute_big_pdf_pipeline(
+                        req_data,
+                        fallback_prompt=prompt,
+                        provider=provider,
+                        model=model,
+                        analysis_mode=analysis_mode,
+                        output_language=output_language,
+                        on_event=on_event,
+                    )
+                except ValueError as e:
+                    if not self.should_fallback_from_pipeline_error(e):
+                        raise
+                    on_event(
+                        {
+                            "type": "meta",
+                            "phase": "pipeline_fallback",
+                            "message": str(e),
+                        }
+                    )
+                    run_result = self.execute_with_provider_fallback(
+                        prompt,
+                        provider,
+                        model,
+                        analysis_mode=analysis_mode,
+                        stream=True,
+                        on_chunk=on_chunk,
+                        on_event=on_event,
+                    )
+                    run_result["pipelineUsed"] = False
+                    existing_errors = list(run_result.get("errors", []) or [])
+                    existing_errors.append(f"pipeline-fallback: {str(e)}")
+                    run_result["errors"] = existing_errors
             tail = self.stream_noise_filter_flush(stream_provider.get("name", provider), stream_filter_state)
             if tail:
                 stream_chunks.append(tail)
@@ -2286,6 +3197,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             errors = run_result.get("errors", [])
             provider_used = self.normalize_provider(run_result.get("providerUsed", provider))
             fallback_used = bool(run_result.get("fallbackUsed", False))
+            pipeline_used = bool(run_result.get("pipelineUsed", False))
             response_text = self.sanitize_provider_output(raw_response_text, provider_used)
             if response_text and response_text != raw_response_text:
                 emit({"type": "replace", "text": response_text})
@@ -2303,6 +3215,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     "provider": provider,
                     "providerUsed": provider_used,
                     "fallbackUsed": fallback_used,
+                    "pipelineUsed": pipeline_used,
                 }
                 if status == 429:
                     payload["code"] = "RATE_LIMIT"
@@ -2337,6 +3250,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         "providerUsed": provider_used,
                         "fallbackUsed": fallback_used,
                         "languageAdjusted": language_adjusted,
+                        "pipelineUsed": pipeline_used,
+                        "pipelineTemplate": run_result.get("pipelineTemplate", ""),
+                        "pipelineChunkMode": run_result.get("pipelineChunkMode", ""),
+                        "pipelineFinalMode": run_result.get("pipelineFinalMode", ""),
                     },
                     self.ai_response_cache_ttl_seconds(analysis_mode),
                 )
@@ -2348,6 +3265,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 "providerUsed": provider_used,
                 "fallbackUsed": fallback_used,
                 "languageAdjusted": language_adjusted,
+                "pipelineUsed": pipeline_used,
+                "pipelineTemplate": run_result.get("pipelineTemplate", ""),
+                "pipelineChunkMode": run_result.get("pipelineChunkMode", ""),
+                "pipelineFinalMode": run_result.get("pipelineFinalMode", ""),
                 "cached": False,
                 "deduped": False,
             }
@@ -2367,10 +3288,22 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
 class ThreadedHTTPServer(http.server.HTTPServer):
     """Handle each request in a separate thread so long Claude calls don't block."""
+    allow_reuse_address = True
+    request_queue_size = 128
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._worker_semaphore = threading.BoundedSemaphore(MAX_SERVER_WORKERS)
+
     def process_request(self, request, client_address):
+        self._worker_semaphore.acquire()
         thread = threading.Thread(target=self._handle, args=(request, client_address))
         thread.daemon = True
-        thread.start()
+        try:
+            thread.start()
+        except Exception:
+            self._worker_semaphore.release()
+            raise
 
     def _handle(self, request, client_address):
         try:
@@ -2379,6 +3312,7 @@ class ThreadedHTTPServer(http.server.HTTPServer):
             self.handle_error(request, client_address)
         finally:
             self.shutdown_request(request)
+            self._worker_semaphore.release()
 
 if __name__ == '__main__':
     print(f"  Orhon'un Zotero Paneli / Orhon's Zotero Dashboard")
