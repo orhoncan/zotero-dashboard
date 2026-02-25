@@ -20,24 +20,42 @@
     }
   })();
 </script>
+<script>
+  (function applySavedThemeEarly() {
+    try {
+      var savedTheme = localStorage.getItem('zotero-theme') || 'dark';
+      if (savedTheme === 'light') {
+        document.documentElement.classList.add('theme-light');
+        document.documentElement.classList.remove('dark');
+      } else {
+        document.documentElement.classList.remove('theme-light');
+        document.documentElement.classList.add('dark');
+      }
+    } catch (e) {
+      document.documentElement.classList.remove('theme-light');
+      document.documentElement.classList.add('dark');
+    }
+  })();
+</script>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.7/dist/purify.min.js"></script>
 <script src="/assets/vendor/pdfjs/2.10.377/pdf.min.js?v=20260223f"></script>
 <script src="/assets/js/base.js" defer></script>
+<script src="/assets/js/features/formatting.js?v=20260225e" defer></script>
 <script src="/assets/js/features/helpers.js" defer></script>
 <script src="/assets/js/features/theme.js" defer></script>
-<script src="/assets/js/features/data.js" defer></script>
+<script src="/assets/js/features/data.js?v=20260225d" defer></script>
 <script src="/assets/js/features/pdf.js?v=20260223g" defer></script>
-<script src="/assets/js/features/chat.js?v=20260223j" defer></script>
+<script src="/assets/js/features/chat.js?v=20260225d" defer></script>
 <script src="/assets/js/features/metadata.js" defer></script>
-<script src="/assets/js/features/compare.js" defer></script>
+<script src="/assets/js/features/compare.js?v=20260225d" defer></script>
 <script src="/assets/js/features/export.js" defer></script>
-<script src="/assets/js/dashboard.js" defer></script>
+<script src="/assets/js/dashboard.js?v=20260225d" defer></script>
 <script src="/assets/js/layout-loader.js" defer></script>
 <script src="https://cdn.jsdelivr.net/npm/alpinejs@3/dist/cdn.min.js" defer></script>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/assets/css/dashboard.css">
+<link rel="stylesheet" href="/assets/css/dashboard.css?v=20260225b">
 </head>
 <body x-data="dashboard()" x-init="init()" class="h-[100dvh] overflow-hidden flex flex-col">
 

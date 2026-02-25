@@ -32,9 +32,11 @@
       async compareSelectedItems() {
         if (
           this.selectedCompareKeys.length < 2 ||
-          this.selectedCompareKeys.length > 3 ||
-          this.chatLoading
+          this.selectedCompareKeys.length > 3
         ) {
+          return;
+        }
+        if (typeof this.ensureAiReadyForRequest === 'function' && !this.ensureAiReadyForRequest()) {
           return;
         }
 
@@ -84,20 +86,53 @@
           : (supportsMcp
             ? `Zotero kütüphanemde aşağıdaki ${selected.length} çalışmayı karşılaştır:\n${list}\n\nHer çalışma için önce zotero_get_item_metadata kullan. Gerekirse zotero_get_item_fulltext ile yöntem/bulgu detaylarını al. Araçlar yoksa verilen bağlamla devam et ve eksikleri belirt. Sonuçta şu başlıklarla Türkçe yaz: (1) Ortak temalar, (2) Farklılıklar, (3) Güçlü/Zayıf yönler, (4) Hangi çalışma hangi amaç için daha uygun.`
             : `Zotero kütüphanemde aşağıdaki ${selected.length} çalışmayı SADECE verilen bağlama göre karşılaştır (dış araç erişimi yok):\n${list}\n\nSonuçta şu başlıklarla Türkçe yaz: (1) Ortak temalar, (2) Farklılıklar, (3) Güçlü/Zayıf yönler, (4) Hangi çalışma hangi amaç için daha uygun. Belirsiz/eksik noktaları açıkça işaretle.`);
-        const finalPrompt = typeof this.applyAnalysisModeToPrompt === 'function'
+        let finalPrompt = typeof this.applyAnalysisModeToPrompt === 'function'
           ? this.applyAnalysisModeToPrompt(prompt, supportsMcp)
           : prompt;
+        if (typeof this.applySourceRoutingDirectiveToPrompt === 'function') {
+          finalPrompt = this.applySourceRoutingDirectiveToPrompt(finalPrompt);
+        }
 
         if (typeof this.markCompareChat === 'function') {
           this.markCompareChat(selected.map((item) => item.key));
+        }
+        const displayText = this.aiLanguage === 'en'
+          ? `Multi-compare (${selected.length} items)`
+          : `Çoklu karşılaştırma (${selected.length} öğe)`;
+
+        if (typeof this.enqueueChatTask === 'function') {
+          const sourceTitle = selected[0]?.data?.title || (this.aiLanguage === 'en' ? 'Untitled' : 'Başlıksız');
+          this.enqueueChatTask({
+            prompt: finalPrompt,
+            message: displayText,
+            label: displayText,
+            scopeKey: this.currentChatScopeKey(),
+            itemKey: selected[0]?.key || this.selectedItem?.key || '',
+            itemTitle: sourceTitle,
+            options: {
+              provider: this.aiProvider,
+              model: this.aiModel || '',
+              analysisMode: this.aiAnalysisMode || 'balanced',
+              language: this.aiLanguage || 'tr',
+              bigPdfPipeline: false,
+              bigPdfQuery: '',
+              pipelineChunkLimit: this.pipelineChunkLimit,
+              routingSensitive: true,
+              sourceRoutingMode: !!this.sourceRoutingMode,
+              forceSourceRouting: false,
+              userMessage: displayText,
+              requestSnapshot: typeof this.buildRequestContextSnapshot === 'function'
+                ? this.buildRequestContextSnapshot()
+                : {},
+            },
+          });
+          return;
         }
 
         this.chatMessages.push({
           role: 'user',
           content: finalPrompt,
-          display: this.aiLanguage === 'en'
-            ? `Multi-compare (${selected.length} items)`
-            : `Çoklu karşılaştırma (${selected.length} öğe)`,
+          display: displayText,
         });
         this.persistChatForCurrentItem();
         await this._sendToApi(finalPrompt);

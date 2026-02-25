@@ -253,16 +253,21 @@
       },
 
       pipelineTemplateStorageKey() {
-        return 'zotero-pipeline-template';
+        return 'zotero-pipeline-template-v2';
       },
 
       pipelineChunkLimitStorageKey() {
         return 'zotero-pipeline-chunk-limit';
       },
 
+      sourceRoutingModeStorageKey() {
+        return 'zotero-source-routing-mode';
+      },
+
       pipelineTemplateOptions() {
         if (this.aiLanguage === 'en') {
           return [
+            { value: 'none', label: 'None (default)' },
             { value: 'study', label: 'Study Note' },
             { value: 'presentation', label: 'Presentation' },
             { value: 'review', label: 'Peer Review' },
@@ -271,6 +276,7 @@
           ];
         }
         return [
+          { value: 'none', label: 'Yok (varsayılan)' },
           { value: 'study', label: 'Çalışma Notu' },
           { value: 'presentation', label: 'Sunum' },
           { value: 'review', label: 'Hakem Değerlendirmesi' },
@@ -290,9 +296,9 @@
       },
 
       normalizePipelineTemplate(value) {
-        const allowed = new Set(['study', 'presentation', 'review', 'thesis_notes', 'policy_brief']);
+        const allowed = new Set(['none', 'study', 'presentation', 'review', 'thesis_notes', 'policy_brief']);
         const normalized = String(value || '').trim();
-        return allowed.has(normalized) ? normalized : 'study';
+        return allowed.has(normalized) ? normalized : 'none';
       },
 
       normalizePipelineChunkLimit(value) {
@@ -322,8 +328,194 @@
         }
       },
 
+      escapeRegex(value) {
+        return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      },
+
+      stripDirectiveBlock(prompt, headers = []) {
+        const raw = String(prompt || '');
+        if (!raw) return '';
+        const normalizedHeaders = (headers || [])
+          .map((header) => String(header || '').trim())
+          .filter(Boolean);
+        if (!normalizedHeaders.length) return raw.trim();
+        const headerPattern = normalizedHeaders.map((header) => this.escapeRegex(header)).join('|');
+        const regex = new RegExp(`(?:^|\\n)(?:${headerPattern})\\s*`, 'g');
+        let match;
+        let cutIndex = -1;
+        while ((match = regex.exec(raw)) !== null) {
+          cutIndex = match.index;
+        }
+        if (cutIndex < 0) return raw.trim();
+        return raw.slice(0, cutIndex).trimEnd();
+      },
+
+      stripTemplateDirectiveFromPrompt(prompt) {
+        return this.stripDirectiveBlock(prompt, ['OUTPUT TEMPLATE:', 'ÇIKTI ŞABLONU:']);
+      },
+
+      refreshQueuedTemplatePrompts() {
+        const nextTemplate = this.normalizePipelineTemplate(this.pipelineTemplate);
+        let updated = 0;
+        this.chatTaskQueue = (this.chatTaskQueue || []).map((task) => {
+          if (!task || task.status !== 'queued') return task;
+          const promptText = String(task.prompt || '');
+          const hasTemplateBlock =
+            promptText.includes('OUTPUT TEMPLATE:') || promptText.includes('ÇIKTI ŞABLONU:');
+          const templateSensitive =
+            task.options?.templateSensitive === true ||
+            (task.options?.templateSensitive !== false && hasTemplateBlock);
+          if (!templateSensitive) return task;
+          const withoutRouting = this.stripSourceRoutingDirectiveFromPrompt(task.prompt);
+          const cleaned = this.stripTemplateDirectiveFromPrompt(withoutRouting);
+          const templatePrompt = this.applyTemplateDirectiveToPrompt(cleaned);
+          const routingEnabled = task.options?.forceSourceRouting === true
+            ? true
+            : (task.options?.sourceRoutingMode === true ? true : null);
+          const refreshedPrompt = this.applySourceRoutingDirectiveToPrompt(templatePrompt, routingEnabled);
+          if (!refreshedPrompt || refreshedPrompt === task.prompt) {
+            return {
+              ...task,
+              options: {
+                ...(task.options || {}),
+                pipelineTemplate: nextTemplate,
+              },
+            };
+          }
+          updated += 1;
+          return {
+            ...task,
+            prompt: refreshedPrompt,
+            options: {
+              ...(task.options || {}),
+              pipelineTemplate: nextTemplate,
+            },
+          };
+        });
+        return updated;
+      },
+
       onPipelineTemplateChange() {
         this.persistPipelineTemplatePreference();
+        const updated = this.refreshQueuedTemplatePrompts();
+        if (updated > 0) {
+          this.persistChatForCurrentItem();
+          this.showToast(
+            this.aiLanguage === 'en'
+              ? `Template updated for ${updated} queued task(s)`
+              : `${updated} bekleyen iş için şablon güncellendi`
+          );
+        }
+        this.runChatTaskQueue();
+      },
+
+      loadSourceRoutingModePreference() {
+        let enabled = false;
+        try {
+          const raw = localStorage.getItem(this.sourceRoutingModeStorageKey());
+          enabled = raw === '1' || raw === 'true';
+        } catch (e) {
+          enabled = !!this.sourceRoutingMode;
+        }
+        this.sourceRoutingMode = !!enabled;
+      },
+
+      persistSourceRoutingModePreference() {
+        this.sourceRoutingMode = !!this.sourceRoutingMode;
+        try {
+          localStorage.setItem(this.sourceRoutingModeStorageKey(), this.sourceRoutingMode ? '1' : '0');
+        } catch (e) {
+          // no-op
+        }
+      },
+
+      stripSourceRoutingDirectiveFromPrompt(prompt) {
+        return this.stripDirectiveBlock(prompt, ['EXTERNAL SOURCE ROUTING:', 'DIŞ KAYNAK YÖNLENDİRME:']);
+      },
+
+      externalSourceRoutingDirectiveText() {
+        if (this.aiLanguage === 'en') {
+          return [
+            'If Zotero context is insufficient, run external scholarly search automatically using the current question.',
+            'Do not output search-plan/query-suggestion sections unless the user explicitly asks for queries.',
+            'Use only academic sources and verify each cited paper before presenting it.',
+            'If external evidence is limited, continue with an academic synthesis from Zotero context.',
+            'Give a direct answer grounded in evidence and include a short source list (title, year, DOI/URL).',
+            'When evidence is missing or uncertain, state that directly instead of inventing details.',
+          ].join('\n- ');
+        }
+        return [
+          'Zotero bağlamı yetersizse mevcut soruya göre dış akademik aramayı otomatik çalıştır.',
+          'Kullanıcı açıkça istemedikçe arama planı/sorgu önerisi üretme.',
+          'Yalnız akademik kaynak kullan ve sunmadan önce her kaynağı doğrula.',
+          'Dış kanıt sınırlıysa Zotero bağlamından akademik bir sentezle devam et.',
+          'Kanıta dayalı doğrudan yanıt ver ve kısa kaynak listesi ekle (başlık, yıl, DOI/URL).',
+          'Kanıt eksikse veya belirsizse uydurma yapma; açıkça belirt.',
+        ].join('\n- ');
+      },
+
+      applySourceRoutingDirectiveToPrompt(prompt, forceEnable = null) {
+        const base = this.stripSourceRoutingDirectiveFromPrompt(prompt);
+        const clean = String(base || '').trim();
+        if (!clean) return '';
+        const enabled = forceEnable === null ? !!this.sourceRoutingMode : !!forceEnable;
+        if (!enabled) return clean;
+        const header = this.aiLanguage === 'en' ? 'EXTERNAL SOURCE ROUTING:' : 'DIŞ KAYNAK YÖNLENDİRME:';
+        const rules = this.externalSourceRoutingDirectiveText();
+        if (!rules) return clean;
+        return `${clean}\n\n${header}\n- ${rules}`;
+      },
+
+      refreshQueuedSourceRoutingPrompts() {
+        let updated = 0;
+        this.chatTaskQueue = (this.chatTaskQueue || []).map((task) => {
+          if (!task || task.status !== 'queued') return task;
+          const promptText = String(task.prompt || '');
+          const hasRoutingBlock =
+            promptText.includes('EXTERNAL SOURCE ROUTING:') ||
+            promptText.includes('DIŞ KAYNAK YÖNLENDİRME:');
+          const routingSensitive =
+            task.options?.routingSensitive === true ||
+            (task.options?.routingSensitive !== false && hasRoutingBlock);
+          if (!routingSensitive) return task;
+
+          const enabled = task.options?.forceSourceRouting === true ? true : !!this.sourceRoutingMode;
+          const refreshedPrompt = this.applySourceRoutingDirectiveToPrompt(promptText, enabled);
+          if (refreshedPrompt === promptText) {
+            return {
+              ...task,
+              options: {
+                ...(task.options || {}),
+                sourceRoutingMode: enabled,
+              },
+            };
+          }
+
+          updated += 1;
+          return {
+            ...task,
+            prompt: refreshedPrompt,
+            options: {
+              ...(task.options || {}),
+              sourceRoutingMode: enabled,
+            },
+          };
+        });
+        return updated;
+      },
+
+      onSourceRoutingModeChange() {
+        this.persistSourceRoutingModePreference();
+        const updated = this.refreshQueuedSourceRoutingPrompts();
+        if (updated > 0) {
+          this.persistChatForCurrentItem();
+          this.showToast(
+            this.aiLanguage === 'en'
+              ? `Source routing updated for ${updated} queued task(s)`
+              : `${updated} bekleyen iş için kaynak yönlendirme güncellendi`
+          );
+        }
+        this.runChatTaskQueue();
       },
 
       loadPipelineChunkLimitPreference() {
@@ -506,11 +698,22 @@
       },
 
       sourceGroundingDirective(supportsMcp = false) {
+        const routingEnabled = !!this.sourceRoutingMode;
         if (this.aiLanguage === 'en') {
+          if (routingEnabled) {
+            return supportsMcp
+              ? 'Grounding rule: Prioritize the provided Zotero context and verified scholarly evidence retrieved in this turn. If evidence is limited, provide a concise academic synthesis and clearly label inferences. Never invent citations.'
+              : 'Grounding rule: Prioritize the provided Zotero context and verified scholarly evidence in this prompt. If evidence is limited, provide a concise academic synthesis and clearly label inferences. Never invent citations.';
+          }
           if (supportsMcp) {
             return 'Grounding rule: Use ONLY the provided Zotero context and the text returned by Zotero MCP tools in this turn. Do not use outside knowledge. If information is missing in the available text, explicitly say it is missing.';
           }
           return 'Grounding rule: Use ONLY the provided Zotero context in this prompt. Do not add outside knowledge. If information is missing in the context, explicitly say it is missing.';
+        }
+        if (routingEnabled) {
+          return supportsMcp
+            ? 'Kaynak kuralı: Verilen Zotero bağlamını ve bu turda getirilen doğrulanmış akademik kanıtları önceliklendir. Kanıt sınırlıysa kısa bir akademik sentez üret ve çıkarımları açıkça etiketle. Uydurma atıf üretme.'
+            : 'Kaynak kuralı: Prompttaki Zotero bağlamını ve doğrulanmış akademik kanıtları önceliklendir. Kanıt sınırlıysa kısa bir akademik sentez üret ve çıkarımları açıkça etiketle. Uydurma atıf üretme.';
         }
         if (supportsMcp) {
           return 'Kaynak kuralı: SADECE bu turda verilen Zotero bağlamı ve Zotero MCP araçlarından dönen metni kullan. Dış bilgi ekleme. Bilgi yoksa açıkça bilgi eksik olduğunu belirt.';
@@ -551,16 +754,19 @@
         if (typeof this.refreshProviderHealth === 'function') {
           this.refreshProviderHealth();
         }
+        this.runChatTaskQueue();
       },
 
       onAiModelChange() {
         this.persistAiModel();
         this.applyChatStateFromCache(this.currentChatScopeKey());
+        this.runChatTaskQueue();
       },
 
       onAiAnalysisModeChange() {
         this.persistAiAnalysisMode();
         this.applyChatStateFromCache(this.currentChatScopeKey());
+        this.runChatTaskQueue();
       },
 
       providerSupportsMcp(provider = this.aiProvider) {
@@ -717,13 +923,368 @@
       clearChatMessages() {
         if (this.chatLoading) return;
         const itemKey = this.selectedItem?.key || '__global__';
+        const scopeKey = this.currentChatScopeKey();
         this.clearChatScopesForItem(itemKey);
         this.chatMessages = [];
         this.chatError = '';
         this.noteEditorContent = '';
+        this.chatTaskQueue = (this.chatTaskQueue || []).filter((task) => String(task?.scopeKey || '') !== scopeKey);
         this.clearCompareChatMode();
         this.persistChatForCurrentItem();
         this.showToast(this.aiLanguage === 'en' ? 'Chat cleared' : 'Sohbet temizlendi');
+      },
+
+      aiRequestDisabledReason() {
+        if (typeof this.aiPreflightState !== 'function') return '';
+        const state = this.aiPreflightState();
+        if (state?.ready) return '';
+        return state?.message || (this.aiLanguage === 'en' ? 'AI is not ready.' : 'AI hazır değil.');
+      },
+
+      canSendAiRequest() {
+        if (typeof this.aiPreflightReady !== 'function') return true;
+        return !!this.aiPreflightReady();
+      },
+
+      ensureAiReadyForRequest() {
+        if (this.canSendAiRequest()) return true;
+        this.showToast(this.aiRequestDisabledReason());
+        return false;
+      },
+
+      nextChatTaskId() {
+        this._chatTaskSeq = Number(this._chatTaskSeq || 0) + 1;
+        return this._chatTaskSeq;
+      },
+
+      chatTaskStatusLabel(status) {
+        const value = String(status || '').toLowerCase();
+        if (this.aiLanguage === 'en') {
+          if (value === 'queued') return 'Queued';
+          if (value === 'running') return 'Running';
+          if (value === 'done') return 'Done';
+          if (value === 'cancelled') return 'Cancelled';
+          if (value === 'error') return 'Error';
+          return 'Unknown';
+        }
+        if (value === 'queued') return 'Bekliyor';
+        if (value === 'running') return 'Çalışıyor';
+        if (value === 'done') return 'Tamamlandı';
+        if (value === 'cancelled') return 'İptal edildi';
+        if (value === 'error') return 'Hata';
+        return 'Bilinmiyor';
+      },
+
+      chatTaskStatusClass(status) {
+        const value = String(status || '').toLowerCase();
+        if (value === 'queued') return 'text-slate-400';
+        if (value === 'running') return 'text-cyan-300';
+        if (value === 'done') return 'text-emerald-300';
+        if (value === 'cancelled') return 'text-amber-300';
+        if (value === 'error') return 'text-red-300';
+        return 'text-slate-400';
+      },
+
+      buildRequestContextSnapshot() {
+        const selected = this.selectedItem;
+        const itemApiBase = selected ? this.zoteroItemApiBase(selected) : this.zoteroItemApiBase(null);
+        const compareKeys =
+          this.compareChatActive && Array.isArray(this.compareChatKeys)
+            ? this.compareChatKeys.slice(0, 6)
+            : [];
+        const contextKeys = this.aiContextSelectedItems()
+          .map((item) => item.key)
+          .slice(0, this.aiContextSelectionLimit() + 1);
+
+        return {
+          itemKey: selected?.key || '',
+          itemApiBase,
+          compareKeys,
+          contextKeys,
+        };
+      },
+
+      updateChatTask(taskId, patch = {}) {
+        const targetId = Number(taskId || 0);
+        if (!targetId) return;
+        this.chatTaskQueue = (this.chatTaskQueue || []).map((row) => {
+          if (Number(row?.id || 0) !== targetId) return row;
+          return {
+            ...row,
+            ...(patch || {}),
+          };
+        });
+      },
+
+      trimChatTaskQueue() {
+        const queue = Array.isArray(this.chatTaskQueue) ? this.chatTaskQueue : [];
+        const maxEntries = 30;
+        if (queue.length <= maxEntries) return;
+        const runningId = Number(this.activeChatTaskId || 0);
+        const pinned = new Set();
+        if (runningId) pinned.add(runningId);
+        const trimmed = [];
+        for (let idx = queue.length - 1; idx >= 0; idx -= 1) {
+          const row = queue[idx];
+          const id = Number(row?.id || 0);
+          const keep =
+            pinned.has(id) ||
+            row?.status === 'queued' ||
+            trimmed.length < maxEntries;
+          if (!keep) continue;
+          trimmed.push(row);
+        }
+        trimmed.reverse();
+        this.chatTaskQueue = trimmed;
+      },
+
+      clearFinishedChatTasks() {
+        const runningId = Number(this.activeChatTaskId || 0);
+        this.chatTaskQueue = (this.chatTaskQueue || []).filter((task) => {
+          const id = Number(task?.id || 0);
+          if (runningId && id === runningId) return true;
+          return task?.status === 'queued' || task?.status === 'running';
+        });
+        this.persistChatForCurrentItem();
+      },
+
+      chatTaskSortRank(status) {
+        const value = String(status || '').toLowerCase();
+        if (value === 'running') return 0;
+        if (value === 'queued') return 1;
+        if (value === 'error') return 2;
+        if (value === 'cancelled') return 3;
+        if (value === 'done') return 4;
+        return 5;
+      },
+
+      visibleChatTasks(limit = 8) {
+        const scopeKey = this.currentChatScopeKey();
+        const queue = [...(this.chatTaskQueue || [])];
+        queue.sort((a, b) => {
+          const aRank = this.chatTaskSortRank(a?.status);
+          const bRank = this.chatTaskSortRank(b?.status);
+          if (aRank !== bRank) return aRank - bRank;
+          const aCurrent = String(a?.scopeKey || '') === scopeKey ? 1 : 0;
+          const bCurrent = String(b?.scopeKey || '') === scopeKey ? 1 : 0;
+          if (aCurrent !== bCurrent) return bCurrent - aCurrent;
+          const aTime = Number(a?.createdAt || 0);
+          const bTime = Number(b?.createdAt || 0);
+          return bTime - aTime;
+        });
+        return queue.slice(0, Math.max(1, Number(limit || 8)));
+      },
+
+      currentScopeChatTaskCount() {
+        return (this.chatTaskQueue || []).length;
+      },
+
+      otherScopeChatTaskCount() {
+        const scopeKey = this.currentChatScopeKey();
+        return (this.chatTaskQueue || []).filter((task) => String(task?.scopeKey || '') !== scopeKey).length;
+      },
+
+      hasFinishedChatTasksInCurrentScope() {
+        return (this.chatTaskQueue || []).some((task) => {
+          const status = String(task?.status || '').toLowerCase();
+          return status === 'done' || status === 'cancelled' || status === 'error';
+        });
+      },
+
+      queueHeaderLabel() {
+        let count = 0;
+        let others = 0;
+        try {
+          count = Number(this.currentScopeChatTaskCount?.() || 0);
+          others = Number(this.otherScopeChatTaskCount?.() || 0);
+        } catch (e) {
+          count = 0;
+          others = 0;
+        }
+        if (this.aiLanguage === 'en') {
+          if (others > 0) {
+            return `Task Queue (${count}, ${others} other papers)`;
+          }
+          return `Task Queue (${count})`;
+        }
+        if (others > 0) {
+          return `İş Kuyruğu (${count}, ${others} diğer makale)`;
+        }
+        return `İş Kuyruğu (${count})`;
+      },
+
+      taskScopeInfo(task) {
+        if (!task || typeof task !== 'object') return '';
+        const scopeKey = this.currentChatScopeKey();
+        const taskScope = String(task.scopeKey || '');
+        if (!taskScope || taskScope === scopeKey) return '';
+        const sourceTitle = String(task.itemTitle || '').trim();
+        if (this.aiLanguage === 'en') {
+          return sourceTitle ? `Paper: ${sourceTitle}` : 'Paper: Other scope';
+        }
+        return sourceTitle ? `Makale: ${sourceTitle}` : 'Makale: Diğer kapsam';
+      },
+
+      async focusTaskScope(task) {
+        if (!task || typeof task !== 'object') return;
+        const key = String(task.itemKey || '').trim();
+        if (!key || key === String(this.selectedItem?.key || '')) return;
+        const finder = typeof this.findItemByKey === 'function'
+          ? this.findItemByKey.bind(this)
+          : (itemKey) => (this.items || []).find((row) => row?.key === itemKey);
+        const item = finder(key);
+        if (!item) {
+          this.showToast(
+            this.aiLanguage === 'en'
+              ? 'Source paper is not in current list'
+              : 'Kaynak makale mevcut listede yok'
+          );
+          return;
+        }
+        await this.selectItem(item);
+        this.detailTab = 'chat';
+      },
+
+      canCancelChatTask(task) {
+        if (!task || typeof task !== 'object') return false;
+        const status = String(task.status || '').toLowerCase();
+        if (status === 'queued') return true;
+        if (status === 'running') {
+          return (
+            Number(this.activeChatTaskId || 0) === Number(task.id || 0) &&
+            !!this.chatLoading &&
+            !!this.chatAbortController
+          );
+        }
+        return false;
+      },
+
+      cancelChatTaskLabel(task) {
+        const status = String(task?.status || '').toLowerCase();
+        if (this.aiLanguage === 'en') {
+          return status === 'running' ? 'Stop' : 'Cancel';
+        }
+        return status === 'running' ? 'Durdur' : 'İptal';
+      },
+
+      cancelChatTask(taskId) {
+        const targetId = Number(taskId || 0);
+        if (!targetId) return;
+        const task = (this.chatTaskQueue || []).find((row) => Number(row?.id || 0) === targetId);
+        if (!task) return;
+
+        const status = String(task.status || '').toLowerCase();
+        if (status === 'queued') {
+          this.updateChatTask(targetId, {
+            status: 'cancelled',
+            finishedAt: this.nowMs(),
+            error: this.aiLanguage === 'en' ? 'Cancelled by user' : 'Kullanıcı tarafından iptal edildi',
+          });
+          this.persistChatForCurrentItem();
+          this.showToast(this.aiLanguage === 'en' ? 'Queued task cancelled' : 'Bekleyen iş iptal edildi');
+          if (!this.chatLoading && !this.activeChatTaskId) {
+            this.runChatTaskQueue();
+          }
+          return;
+        }
+
+        if (
+          status === 'running' &&
+          Number(this.activeChatTaskId || 0) === targetId &&
+          this.chatLoading &&
+          this.chatAbortController
+        ) {
+          this.updateChatTask(targetId, {
+            status: 'cancelled',
+            finishedAt: this.nowMs(),
+            error: this.aiLanguage === 'en' ? 'Cancelled by user' : 'Kullanıcı tarafından iptal edildi',
+          });
+          this.persistChatForCurrentItem();
+          this.stopChatRequest();
+        }
+      },
+
+      enqueueChatTask(payload = {}) {
+        const prompt = String(payload.prompt || '').trim();
+        if (!prompt) return 0;
+        const message = String(payload.message || '').trim() || prompt;
+        const scopeKey = String(payload.scopeKey || this.currentChatScopeKey());
+        const itemKey = String(payload.itemKey || this.selectedItem?.key || '').trim();
+        const itemTitle = String(
+          payload.itemTitle ||
+          this.selectedItem?.data?.title ||
+          (this.aiLanguage === 'en' ? 'General' : 'Genel')
+        ).trim();
+        const task = {
+          id: this.nextChatTaskId(),
+          label: String(payload.label || message).slice(0, 160),
+          display: message,
+          prompt,
+          scopeKey,
+          itemKey,
+          itemTitle,
+          options: { ...(payload.options || {}) },
+          status: 'queued',
+          createdAt: this.nowMs(),
+          startedAt: 0,
+          finishedAt: 0,
+          error: '',
+        };
+        this.chatTaskQueue = [...(this.chatTaskQueue || []), task];
+        this.trimChatTaskQueue();
+        this.persistChatForCurrentItem();
+        this.runChatTaskQueue();
+        return task.id;
+      },
+
+      nextQueuedChatTask() {
+        const queue = Array.isArray(this.chatTaskQueue) ? this.chatTaskQueue : [];
+        const scopeKey = this.currentChatScopeKey();
+        return queue.find((row) => row?.status === 'queued' && String(row?.scopeKey || '') === scopeKey) || null;
+      },
+
+      currentChatTask() {
+        const activeId = Number(this.activeChatTaskId || 0);
+        if (!activeId) return null;
+        return (this.chatTaskQueue || []).find((row) => Number(row?.id || 0) === activeId) || null;
+      },
+
+      async runChatTaskQueue() {
+        if (this.chatLoading || this.activeChatTaskId) return;
+        if (!this.canSendAiRequest()) return;
+
+        const next = this.nextQueuedChatTask();
+        if (!next) return;
+
+        this.activeChatTaskId = next.id;
+        this.updateChatTask(next.id, {
+          status: 'running',
+          startedAt: this.nowMs(),
+          error: '',
+        });
+
+        this.chatMessages.push({
+          role: 'user',
+          content: next.prompt,
+          display: next.display || next.label || next.prompt,
+        });
+        this.persistChatForCurrentItem();
+
+        const result = await this._sendToApi(next.prompt, next.options || {});
+        const state = String(result?.state || 'done');
+        const error = String(result?.error || '').trim();
+        this.updateChatTask(next.id, {
+          status: state === 'error' ? 'error' : (state === 'cancelled' ? 'cancelled' : 'done'),
+          finishedAt: this.nowMs(),
+          error,
+        });
+        this.activeChatTaskId = null;
+        this.trimChatTaskQueue();
+        this.persistChatForCurrentItem();
+
+        if (this.nextQueuedChatTask() && this.canSendAiRequest()) {
+          this.runChatTaskQueue();
+        }
       },
 
       aiContextSelectionLimit() {
@@ -886,6 +1447,7 @@
             notes: 'Analyze Notes',
             related: 'Related Works',
             critique: 'Critical Review',
+            sources: 'Find Sources',
           };
         }
         return {
@@ -893,6 +1455,7 @@
           notes: 'Notları Analiz Et',
           related: 'İlgili Çalışmalar',
           critique: 'Eleştirel Değerlendirme',
+          sources: 'Kaynak Bul',
         };
       },
 
@@ -901,8 +1464,26 @@
         return labels[type] || type;
       },
 
+      templatePromptButtonOptions() {
+        return this.pipelineTemplateOptions().filter((opt) => opt.value !== 'none');
+      },
+
+      async sendTemplatePrompt(templateValue) {
+        const normalized = this.normalizePipelineTemplate(templateValue);
+        if (!normalized || normalized === 'none') return;
+        if (!this.ensureAiReadyForRequest()) return;
+
+        const option = this.pipelineTemplateOptions().find((opt) => opt.value === normalized);
+        const templateLabel = option?.label || (this.aiLanguage === 'en' ? 'Template' : 'Şablon');
+        this.chatInput = this.aiLanguage === 'en'
+          ? `Use the "${templateLabel}" template for this request.`
+          : `Bu istek için "${templateLabel}" şablonunu kullan.`;
+        await this.sendChatMessage();
+      },
+
       templateDirectiveText() {
         const template = this.normalizePipelineTemplate(this.pipelineTemplate);
+        if (template === 'none') return '';
         if (this.aiLanguage === 'en') {
           const map = {
             study:
@@ -934,15 +1515,16 @@
       },
 
       applyTemplateDirectiveToPrompt(prompt) {
-        const base = String(prompt || '').trim();
-        if (!base) return '';
+        const base = this.stripTemplateDirectiveFromPrompt(prompt);
+        const clean = String(base || '').trim();
+        if (!clean) return '';
         const directive = this.templateDirectiveText();
         const header = this.aiLanguage === 'en' ? 'OUTPUT TEMPLATE:' : 'ÇIKTI ŞABLONU:';
         const conflictRule = this.aiLanguage === 'en'
           ? 'If another output format is requested, silently prioritize this template. Do not add format-conflict warnings.'
           : 'Başka bir çıktı biçimi istense bile bu şablonu sessizce önceliklendir. Biçim çakışması uyarısı yazma.';
-        if (!directive || base.includes(header)) return base;
-        return `${base}\n\n${header}\n- ${directive}\n- ${conflictRule}`;
+        if (!directive) return clean;
+        return `${clean}\n\n${header}\n- ${directive}\n- ${conflictRule}`;
       },
 
       quickPromptPipelineQuery(type) {
@@ -967,6 +1549,11 @@
       buildQuickPrompt(type, title, key) {
         const context = this.buildContext();
         const supportsMcp = this.providerSupportsMcp();
+        const forceRouting = type === 'sources';
+        const finalizePrompt = (rawPrompt) => {
+          const withMode = this.applyAnalysisModeToPrompt(rawPrompt, supportsMcp);
+          return this.applySourceRoutingDirectiveToPrompt(withMode, forceRouting ? true : null);
+        };
 
         if (this.aiLanguage === 'en') {
           if (supportsMcp) {
@@ -975,8 +1562,9 @@
               notes: `For "${title}" (key: ${key}) in my Zotero library, gather notes and annotations (zotero_get_notes, zotero_get_annotations). Produce a structured study note in English with: (1) theme-grouped notes, (2) key quotes, (3) a 5-item action/reading list. If tools are unavailable, continue with the Zotero context below.\n\nZotero context:\n${context}`,
               related: `Find works related to "${title}" (key: ${key}) in my Zotero library (zotero_semantic_search). Validate metadata for relevant ones (zotero_get_item_metadata) and compare at most 5 works. Output in English with: (1) similarities, (2) differences, (3) which work answers which question better, (4) recommended reading order. If tools are unavailable, infer likely related directions from the Zotero context below.\n\nZotero context:\n${context}`,
               critique: `For "${title}" (key: ${key}) in my Zotero library, fetch full text when available (zotero_get_item_fulltext) and provide a critical review in English with: (1) clarity of research question, (2) methodological fit, (3) validity threats, (4) original contribution, (5) improvement suggestions. If tools are unavailable, continue with the Zotero context below and label assumptions.\n\nZotero context:\n${context}`,
+              sources: `For "${title}" (key: ${key}) in my Zotero library, use available metadata/full text/notes and automatically augment with external scholarly evidence when needed. Use ONLY academic sources and verify each cited paper before listing it. Include DOI or canonical URL for every source. Produce a direct answer in English with: (1) key evidence-backed takeaways, (2) top relevant papers (title/year + DOI or URL) with one-line relevance, (3) concrete next reading priorities. Do not output search-query suggestions unless explicitly requested. Do not invent facts; mark uncertainty clearly.\n\nZotero context:\n${context}`,
             };
-            return this.applyAnalysisModeToPrompt(prompts[type], supportsMcp);
+            return finalizePrompt(prompts[type]);
           }
 
           const prompts = {
@@ -984,8 +1572,9 @@
             notes: `Create a structured study note for "${title}" (key: ${key}) in English using ONLY the Zotero context below. Output format: (1) theme-grouped notes, (2) key quotes/phrases, (3) 5-item action or reading list. Clearly mark uncertain parts.\n\nZotero context:\n${context}`,
             related: `Based ONLY on the Zotero context below for "${title}" (key: ${key}), propose related works directions in English. Output format: (1) likely related themes, (2) suggested keywords/search queries, (3) what kind of papers to look for, (4) suggested reading order.\n\nZotero context:\n${context}`,
             critique: `Provide a critical review of "${title}" (key: ${key}) in English using ONLY the Zotero context below. Output format: (1) research question clarity, (2) methodological fit, (3) validity risks, (4) original contribution, (5) improvement suggestions. Label assumptions clearly.\n\nZotero context:\n${context}`,
+            sources: `Using the Zotero context below for "${title}" (key: ${key}), provide a direct English answer and enrich it with external scholarly evidence when needed. Use ONLY academic sources and verify each cited paper before listing it. Include DOI or canonical URL for every source. Include: (1) evidence-backed findings, (2) top relevant papers (title/year + DOI or URL) with one-line relevance, (3) practical next reading order. Do not output search-query suggestions unless explicitly requested. Mark missing parts clearly.\n\nZotero context:\n${context}`,
           };
-          return this.applyAnalysisModeToPrompt(prompts[type], supportsMcp);
+          return finalizePrompt(prompts[type]);
         }
 
         if (supportsMcp) {
@@ -994,8 +1583,9 @@
             notes: `Zotero kütüphanemdeki "${title}" (key: ${key}) için notları ve annotation'ları topla (zotero_get_notes, zotero_get_annotations). Düzenli çalışma notu hazırla. Çıktı formatı: (1) temalara göre gruplanmış notlar, (2) öne çıkan alıntılar, (3) 5 maddelik eylem/okuma listesi. Araçlar yoksa aşağıdaki bağlamla devam et.\n\nZotero bağlamı:\n${context}`,
             related: `Zotero kütüphanemde "${title}" (key: ${key}) ile ilişkili çalışmaları bul (zotero_semantic_search). Uygun olanların metadata'sını doğrula (zotero_get_item_metadata) ve en fazla 5 çalışma ile karşılaştırmalı analiz yap. Çıktı formatı: (1) benzerlikler, (2) ayrışmalar, (3) hangi çalışma hangi soruya daha iyi cevap veriyor, (4) önerilen okuma sırası. Araçlar yoksa aşağıdaki bağlama göre olası ilişkili yönleri çıkar.\n\nZotero bağlamı:\n${context}`,
             critique: `Zotero kütüphanemdeki "${title}" (key: ${key}) için mümkünse tam metni getir (zotero_get_item_fulltext) ve eleştirel değerlendirme yap. Çıktı formatı: (1) araştırma sorusu netliği, (2) yöntem uygunluğu, (3) geçerlilik tehditleri, (4) özgün katkı, (5) geliştirme önerileri. Araçlar yoksa aşağıdaki bağlamla devam et ve varsayımları işaretle.\n\nZotero bağlamı:\n${context}`,
+            sources: `Zotero kütüphanemdeki "${title}" (key: ${key}) için mevcut metadata/tam metin/notları kullan, gerekirse dış akademik kaynakları otomatik tarayarak doğrudan yanıt üret. Yalnız akademik kaynak kullan; sunmadan önce her kaynağı doğrula ve DOI veya kanonik URL ekle. Çıktıda şunları ver: (1) kanıta dayalı temel çıkarımlar, (2) en ilgili çalışmalar (başlık/yıl + DOI veya URL) ve kısa uygunluk gerekçesi, (3) pratik okuma önceliği. Kullanıcı açıkça istemedikçe arama sorgusu önerisi yazma. Bağlam dışı bilgi uydurma; belirsizlikleri açıkça belirt.\n\nZotero bağlamı:\n${context}`,
           };
-          return this.applyAnalysisModeToPrompt(prompts[type], supportsMcp);
+          return finalizePrompt(prompts[type]);
         }
 
         const prompts = {
@@ -1003,8 +1593,9 @@
           notes: `Zotero kütüphanemdeki "${title}" (key: ${key}) için SADECE aşağıdaki Zotero bağlamını kullanarak düzenli çalışma notu hazırla. Çıktı formatı: (1) temalara göre notlar, (2) öne çıkan ifadeler/alıntılar, (3) 5 maddelik eylem/okuma listesi. Belirsiz noktaları işaretle.\n\nZotero bağlamı:\n${context}`,
           related: `SADECE aşağıdaki Zotero bağlamına göre "${title}" (key: ${key}) ile ilişkili olabilecek çalışma yönlerini Türkçe öner. Çıktı formatı: (1) olası ilişkili temalar, (2) aranacak anahtar kelimeler/sorgular, (3) hangi tür kaynaklara bakılmalı, (4) önerilen okuma sırası.\n\nZotero bağlamı:\n${context}`,
           critique: `Zotero kütüphanemdeki "${title}" (key: ${key}) için SADECE aşağıdaki Zotero bağlamını kullanarak eleştirel değerlendirme yap. Çıktı formatı: (1) araştırma sorusu netliği, (2) yöntem uygunluğu, (3) geçerlilik riskleri, (4) özgün katkı, (5) geliştirme önerileri. Varsayımları açıkça belirt.\n\nZotero bağlamı:\n${context}`,
+          sources: `Aşağıdaki Zotero bağlamına göre "${title}" (key: ${key}) için doğrudan Türkçe yanıt ver; ihtiyaç varsa dış akademik kaynaklardan bulguyu kendin getirerek güçlendir. Yalnız akademik kaynak kullan; sunmadan önce her kaynağı doğrula ve DOI veya kanonik URL ekle. Çıktıda şunları ver: (1) kanıta dayalı bulgular, (2) en ilgili çalışmalar (başlık/yıl + DOI veya URL) ve kısa uygunluk notu, (3) önerilen okuma sırası. Kullanıcı açıkça istemedikçe arama sorgusu önerisi yazma. Eksikleri açıkça belirt.\n\nZotero bağlamı:\n${context}`,
         };
-        return this.applyAnalysisModeToPrompt(prompts[type], supportsMcp);
+        return finalizePrompt(prompts[type]);
       },
 
       async selectItem(item) {
@@ -1026,6 +1617,7 @@
         if (typeof this.syncMetadataEditorFromSelectedItem === 'function') {
           this.syncMetadataEditorFromSelectedItem();
         }
+        this.runChatTaskQueue();
 
         try {
           const children = await fetch(`${ns.API}/items/${item.key}/children?format=json`).then((r) =>
@@ -1180,6 +1772,35 @@
         if (!next) return;
         const current = String(this.noteEditorContent || '').trim();
         this.noteEditorContent = current ? `${current}\n\n${next}` : next;
+      },
+
+      formatAssistantResponseText(text) {
+        const raw = String(text || '');
+        if (!raw.trim()) return '';
+        if (typeof this.postFormatAssistantOutput === 'function') {
+          return this.postFormatAssistantOutput(raw);
+        }
+        return raw.trim();
+      },
+
+      reflowAssistantMessage(index) {
+        const idx = Number(index);
+        if (!Number.isInteger(idx) || idx < 0 || idx >= this.chatMessages.length) return;
+        const current = this.chatMessages[idx];
+        if (!current || current.role !== 'assistant') return;
+        const raw = String(current.content || '');
+        const formatted = this.formatAssistantResponseText(raw);
+        if (!formatted) return;
+        if (formatted === raw) {
+          this.showToast(this.aiLanguage === 'en' ? 'Format is already clean' : 'Biçim zaten düzgün');
+          return;
+        }
+        this.chatMessages[idx] = {
+          ...current,
+          content: formatted,
+        };
+        this.persistChatForCurrentItem();
+        this.showToast(this.aiLanguage === 'en' ? 'Message format updated' : 'Mesaj biçimi güncellendi');
       },
 
       underlineSelectionInEditor() {
@@ -1489,20 +2110,36 @@
       },
 
       async sendClaude(type) {
-        if (!this.selectedItem || this.chatLoading) return;
+        if (!this.selectedItem) return;
+        if (!this.ensureAiReadyForRequest()) return;
 
         this.clearCompareChatMode();
         const key = this.selectedItem.key;
         const title = this.selectedItem.data.title;
         const labels = this.quickPromptLabels();
-        let prompt = this.buildQuickPrompt(type, title, key);
-        this.chatMessages.push({ role: 'user', content: prompt, display: `${labels[type]}: ${title}` });
-        this.persistChatForCurrentItem();
-        await this._sendToApi(prompt, {
-          bigPdfPipeline: false,
-          bigPdfQuery: '',
-          pipelineTemplate: this.pipelineTemplate,
-          pipelineChunkLimit: this.pipelineChunkLimit,
+        const prompt = this.buildQuickPrompt(type, title, key);
+        const forceSourceRouting = type === 'sources';
+        this.enqueueChatTask({
+          prompt,
+          message: `${labels[type]}: ${title}`,
+          label: labels[type] || type,
+          scopeKey: this.currentChatScopeKey(),
+          itemKey: key,
+          itemTitle: title || (this.aiLanguage === 'en' ? 'Untitled' : 'Başlıksız'),
+          options: {
+            provider: this.aiProvider,
+            model: this.aiModel || '',
+            analysisMode: this.aiAnalysisMode || 'balanced',
+            language: this.aiLanguage || 'tr',
+            bigPdfPipeline: false,
+            bigPdfQuery: '',
+            pipelineChunkLimit: this.pipelineChunkLimit,
+            routingSensitive: true,
+            sourceRoutingMode: !!this.sourceRoutingMode || forceSourceRouting,
+            forceSourceRouting: forceSourceRouting,
+            userMessage: `${labels[type] || type}: ${title}`,
+            requestSnapshot: this.buildRequestContextSnapshot(),
+          },
         });
       },
 
@@ -1544,13 +2181,15 @@
       },
 
       async sendBigPdfPipelineQuick() {
-        if (!this.selectedItem || this.chatLoading) return;
+        if (!this.selectedItem) return;
+        if (!this.ensureAiReadyForRequest()) return;
         this.chatInput = this.pipelineQuickCommand();
         await this.sendChatMessage();
       },
 
       async sendChatMessage() {
-        if (!this.chatInput.trim() || this.chatLoading) return;
+        if (!this.chatInput.trim()) return;
+        if (!this.ensureAiReadyForRequest()) return;
 
         this.clearCompareChatMode();
         const rawMessage = this.chatInput.trim();
@@ -1606,22 +2245,34 @@
             }
           }
           prompt = this.applyAnalysisModeToPrompt(prompt, supportsMcp);
-          if (!pipelineEnabled) {
-            prompt = this.applyTemplateDirectiveToPrompt(prompt);
-          }
         } else if (this.aiLanguage === 'en') {
           prompt = `${message}. Respond in English.\n\n${this.outputConstraintDirective(false)}`;
         } else {
           prompt = `${message}. Türkçe yanıtla.\n\n${this.outputConstraintDirective(false)}`;
         }
+        prompt = this.applySourceRoutingDirectiveToPrompt(prompt);
 
-        this.chatMessages.push({ role: 'user', content: prompt, display: message });
-        this.persistChatForCurrentItem();
-        await this._sendToApi(prompt, {
-          bigPdfPipeline: pipelineEnabled,
-          bigPdfQuery: message,
-          pipelineTemplate: this.pipelineTemplate,
-          pipelineChunkLimit: this.pipelineChunkLimit,
+        this.enqueueChatTask({
+          prompt,
+          message,
+          label: message.slice(0, 80),
+          scopeKey: this.currentChatScopeKey(),
+          itemKey: this.selectedItem?.key || '',
+          itemTitle: this.selectedItem?.data?.title || (this.aiLanguage === 'en' ? 'General' : 'Genel'),
+          options: {
+            provider: this.aiProvider,
+            model: this.aiModel || '',
+            analysisMode: this.aiAnalysisMode || 'balanced',
+            language: this.aiLanguage || 'tr',
+            bigPdfPipeline: pipelineEnabled,
+            bigPdfQuery: message,
+            pipelineChunkLimit: this.pipelineChunkLimit,
+            routingSensitive: true,
+            sourceRoutingMode: !!this.sourceRoutingMode,
+            forceSourceRouting: false,
+            userMessage: message,
+            requestSnapshot: this.buildRequestContextSnapshot(),
+          },
         });
       },
 
@@ -1677,10 +2328,14 @@
           throw err;
         }
         if (type === 'done') {
-          if (event.text) {
-            this.replaceStreamingContent(streamState, event.text);
+          const existing = streamState.assistantIndex >= 0
+            ? String(this.chatMessages[streamState.assistantIndex]?.content || '')
+            : '';
+          const formatted = this.formatAssistantResponseText(event.text || existing);
+          if (formatted) {
+            this.replaceStreamingContent(streamState, formatted);
           }
-          streamState.providerUsed = event.providerUsed || streamState.providerUsed || this.aiProvider;
+          streamState.providerUsed = event.providerUsed || streamState.providerUsed || 'claude';
           streamState.fallbackUsed = !!event.fallbackUsed;
           streamState.languageAdjusted = !!event.languageAdjusted;
           streamState.cached = !!event.cached;
@@ -1690,6 +2345,7 @@
       },
 
       async _sendToApiStreaming(requestBody) {
+        const requestedProvider = this.normalizeAiProvider(requestBody?.provider || this.aiProvider);
         const res = await fetch('/claude-stream', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1712,7 +2368,7 @@
 
         const streamState = {
           assistantIndex: -1,
-          providerUsed: this.aiProvider,
+          providerUsed: requestedProvider,
           fallbackUsed: false,
           languageAdjusted: false,
           cached: false,
@@ -1777,8 +2433,8 @@
         if (streamState.fallbackUsed) {
           this.showToast(
             this.aiLanguage === 'en'
-              ? `Auto fallback used (${this.fallbackChainLabel(this.aiProvider)})`
-              : `Otomatik fallback kullanıldı (${this.fallbackChainLabel(this.aiProvider)})`
+              ? `Auto fallback used (${this.fallbackChainLabel(requestedProvider)})`
+              : `Otomatik fallback kullanıldı (${this.fallbackChainLabel(requestedProvider)})`
           );
         }
         if (streamState.languageAdjusted) {
@@ -1795,6 +2451,7 @@
       },
 
       async _sendToApiJsonFallback(requestBody) {
+        const requestedProvider = this.normalizeAiProvider(requestBody?.provider || this.aiProvider);
         const res = await fetch('/claude', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1802,16 +2459,19 @@
           body: JSON.stringify(requestBody),
         });
         const data = await this.parseJsonResponse(res, '/claude');
+        const assistantText = this.formatAssistantResponseText(
+          data.text || (this.aiLanguage === 'en' ? 'No response received.' : 'Yanıt alınamadı.')
+        );
         this.chatMessages.push({
           role: 'assistant',
-          content: data.text || (this.aiLanguage === 'en' ? 'No response received.' : 'Yanıt alınamadı.'),
+          content: assistantText,
         });
-        this.appendAssistantResponseToEditor(data.text || '');
+        this.appendAssistantResponseToEditor(assistantText);
         if (data?.fallbackUsed) {
           this.showToast(
             this.aiLanguage === 'en'
-              ? `Auto fallback used (${this.fallbackChainLabel(this.aiProvider)})`
-              : `Otomatik fallback kullanıldı (${this.fallbackChainLabel(this.aiProvider)})`
+              ? `Auto fallback used (${this.fallbackChainLabel(requestedProvider)})`
+              : `Otomatik fallback kullanıldı (${this.fallbackChainLabel(requestedProvider)})`
           );
         }
         if (data?.languageAdjusted) {
@@ -1827,6 +2487,8 @@
         this.chatLoading = true;
         this.chatAbortController = new AbortController();
         this.chatError = '';
+        let resultState = 'done';
+        let resultError = '';
 
         this.$nextTick(() => {
           this.$refs.chatScroll?.scrollTo({
@@ -1835,26 +2497,52 @@
           });
         });
 
-        const requestItemKey = this.selectedItem?.key || '';
-        const requestCompareKeys =
-          this.compareChatActive && Array.isArray(this.compareChatKeys)
-            ? this.compareChatKeys.slice(0, 6)
-            : [];
-        const requestItemApiBase = this.selectedItem ? this.zoteroItemApiBase(this.selectedItem) : this.zoteroItemApiBase(null);
+        const snapshot = options?.requestSnapshot && typeof options.requestSnapshot === 'object'
+          ? options.requestSnapshot
+          : this.buildRequestContextSnapshot();
+        const requestItemKey = String(snapshot?.itemKey || '');
+        const requestCompareKeys = Array.isArray(snapshot?.compareKeys)
+          ? snapshot.compareKeys.slice(0, 6)
+          : [];
+        const requestContextKeys = Array.isArray(snapshot?.contextKeys)
+          ? snapshot.contextKeys.slice(0, this.aiContextSelectionLimit() + 1)
+          : this.aiContextSelectedItems().map((item) => item.key).slice(0, this.aiContextSelectionLimit() + 1);
+        const requestItemApiBase = String(
+          snapshot?.itemApiBase ||
+          (this.selectedItem ? this.zoteroItemApiBase(this.selectedItem) : this.zoteroItemApiBase(null))
+        );
+        const requestProvider = this.normalizeAiProvider(options.provider || this.aiProvider);
+        const requestModel = typeof options.model === 'string' ? options.model : (this.aiModel || '');
+        const requestAnalysisMode = this.normalizeAiAnalysisMode(options.analysisMode || this.aiAnalysisMode);
+        const requestLanguage = ['tr', 'en'].includes(String(options.language || '').toLowerCase())
+          ? String(options.language || '').toLowerCase()
+          : (this.aiLanguage || 'tr');
+        const sourceRoutingEnabled =
+          options.forceSourceRouting === true
+            ? true
+            : !!options.sourceRoutingMode;
+        let finalPrompt = String(prompt || '');
+        finalPrompt = this.stripSourceRoutingDirectiveFromPrompt(finalPrompt);
+        finalPrompt = this.stripTemplateDirectiveFromPrompt(finalPrompt);
+        finalPrompt = this.applySourceRoutingDirectiveToPrompt(finalPrompt, sourceRoutingEnabled);
+
         const requestBody = {
-          prompt,
-          provider: this.aiProvider,
-          model: this.aiModel || '',
-          analysisMode: this.aiAnalysisMode || 'balanced',
-          language: this.aiLanguage || 'tr',
+          prompt: finalPrompt,
+          provider: requestProvider,
+          model: requestModel,
+          analysisMode: requestAnalysisMode,
+          language: requestLanguage,
           itemKey: requestItemKey,
           itemApiBase: requestItemApiBase,
           compareKeys: requestCompareKeys,
-          contextKeys: this.aiContextSelectedItems().map((item) => item.key).slice(0, this.aiContextSelectionLimit() + 1),
+          contextKeys: requestContextKeys,
           bigPdfPipeline: !!options.bigPdfPipeline,
           bigPdfQuery: String(options.bigPdfQuery || '').trim(),
-          pipelineTemplate: this.normalizePipelineTemplate(options.pipelineTemplate || this.pipelineTemplate),
           pipelineChunkLimit: this.normalizePipelineChunkLimit(options.pipelineChunkLimit || this.pipelineChunkLimit),
+          sourceRoutingMode: sourceRoutingEnabled,
+          forceSourceRouting: options.forceSourceRouting === true,
+          userMessage: String(options.userMessage || '').trim(),
+          selectedItemTitle: String(this.selectedItem?.data?.title || '').trim(),
         };
 
         try {
@@ -1869,9 +2557,12 @@
           this.persistChatForCurrentItem();
         } catch (e) {
           if (e?.name === 'AbortError') {
+            resultState = 'cancelled';
             this.showToast(this.aiLanguage === 'en' ? 'Request stopped' : 'İstek durduruldu');
           } else {
-            this.chatError = e?.message || (this.aiLanguage === 'en' ? 'Unknown error' : 'Bilinmeyen hata');
+            resultState = 'error';
+            resultError = e?.message || (this.aiLanguage === 'en' ? 'Unknown error' : 'Bilinmeyen hata');
+            this.chatError = resultError;
             this.persistChatForCurrentItem();
           }
         }
@@ -1885,6 +2576,10 @@
             behavior: 'smooth',
           });
         });
+        return {
+          state: resultState,
+          error: resultError,
+        };
       },
     };
   });

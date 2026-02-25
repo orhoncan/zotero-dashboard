@@ -127,6 +127,11 @@
               </div>
               <div class="flex items-center justify-end gap-2 pt-1">
                 <button
+                  @click="undoLastMetadataChange()"
+                  :disabled="metadataSaving || !hasMetadataUndoForSelectedItem()"
+                  class="text-[10px] px-2 py-1 rounded-md border border-amber-600/60 bg-amber-500/10 hover:bg-amber-500/20 disabled:opacity-40 transition"
+                  x-text="aiLanguage === 'en' ? 'Undo' : 'Geri Al'"></button>
+                <button
                   @click="syncMetadataEditorFromSelectedItem()"
                   :disabled="metadataSaving"
                   class="text-[10px] px-2 py-1 rounded-md border border-slate-600 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 transition"

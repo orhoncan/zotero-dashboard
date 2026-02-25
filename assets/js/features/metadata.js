@@ -3,6 +3,73 @@
 
   ns.registerMixin(function registerMetadata() {
     return {
+      metadataUndoEntry(item = this.selectedItem) {
+        const itemKey = String(item?.key || '').trim();
+        if (!itemKey || !item?.data) return null;
+        const tags = Array.isArray(item.data.tags) ? item.data.tags : [];
+        return {
+          itemKey,
+          abstractNote: String(item.data.abstractNote || '').trim(),
+          tags: tags
+            .map((entry) => String(entry?.tag || '').trim())
+            .filter(Boolean)
+            .map((tag) => ({ tag })),
+          savedAt: Date.now(),
+        };
+      },
+
+      normalizeMetadataTagArray(tags) {
+        const seen = new Set();
+        const normalized = [];
+        (Array.isArray(tags) ? tags : []).forEach((entry) => {
+          const value = String(entry?.tag || '').trim();
+          if (!value) return;
+          const key = this.normalizeText(value);
+          if (seen.has(key)) return;
+          seen.add(key);
+          normalized.push(value);
+        });
+        return normalized.sort((a, b) => a.localeCompare(b, this.localeCode || 'tr'));
+      },
+
+      metadataPayloadEqual(left, right) {
+        const a = left || {};
+        const b = right || {};
+        const abstractA = String(a.abstractNote || '').trim();
+        const abstractB = String(b.abstractNote || '').trim();
+        if (abstractA !== abstractB) return false;
+        const tagsA = this.normalizeMetadataTagArray(a.tags || []);
+        const tagsB = this.normalizeMetadataTagArray(b.tags || []);
+        if (tagsA.length !== tagsB.length) return false;
+        return tagsA.every((tag, idx) => tag === tagsB[idx]);
+      },
+
+      pushMetadataUndoEntry(entry) {
+        if (!entry?.itemKey) return;
+        const next = [...(this.metadataUndoStack || []), entry];
+        const max = Math.max(3, Number(this.metadataUndoLimit || 20));
+        this.metadataUndoStack = next.slice(-max);
+      },
+
+      hasMetadataUndoForSelectedItem() {
+        const key = String(this.selectedItem?.key || '').trim();
+        if (!key) return false;
+        return (this.metadataUndoStack || []).some((entry) => entry?.itemKey === key);
+      },
+
+      popMetadataUndoForSelectedItem() {
+        const key = String(this.selectedItem?.key || '').trim();
+        if (!key) return null;
+        const stack = [...(this.metadataUndoStack || [])];
+        for (let idx = stack.length - 1; idx >= 0; idx -= 1) {
+          if (stack[idx]?.itemKey !== key) continue;
+          const [entry] = stack.splice(idx, 1);
+          this.metadataUndoStack = stack;
+          return entry;
+        }
+        return null;
+      },
+
       syncMetadataEditorFromSelectedItem() {
         if (!this.selectedItem?.data) {
           this.editAbstract = '';
@@ -185,12 +252,16 @@
 
         const itemKey = this.selectedItem.key;
         const payload = this.buildMetadataPayload();
+        const previous = this.metadataUndoEntry(this.selectedItem);
 
         this.metadataSaving = true;
         this.chatError = '';
         try {
           await this.updateItemWithFallbacks(itemKey, payload);
           this.applyMetadataToLocalState(itemKey, payload);
+          if (previous && !this.metadataPayloadEqual(previous, payload)) {
+            this.pushMetadataUndoEntry(previous);
+          }
           await this.refreshTagCloud();
           this.showToast(
             this.aiLanguage === 'en' ? 'Metadata synced to Zotero' : "Metadata Zotero'ya senkronize edildi"
@@ -204,6 +275,44 @@
             this.aiLanguage === 'en'
               ? 'Metadata could not be saved'
               : 'Metadata kaydedilemedi'
+          );
+        } finally {
+          this.metadataSaving = false;
+        }
+      },
+
+      async undoLastMetadataChange() {
+        if (!this.selectedItem?.key || this.metadataSaving) return;
+        const entry = this.popMetadataUndoForSelectedItem();
+        if (!entry) {
+          this.showToast(this.aiLanguage === 'en' ? 'No metadata change to undo' : 'Geri alınacak metadata değişikliği yok');
+          return;
+        }
+
+        const itemKey = this.selectedItem.key;
+        const payload = {
+          abstractNote: String(entry.abstractNote || ''),
+          tags: (entry.tags || []).map((row) => ({ tag: String(row?.tag || '').trim() })).filter((row) => row.tag),
+        };
+
+        this.metadataSaving = true;
+        this.chatError = '';
+        try {
+          await this.updateItemWithFallbacks(itemKey, payload);
+          this.applyMetadataToLocalState(itemKey, payload);
+          this.syncMetadataEditorFromSelectedItem();
+          await this.refreshTagCloud();
+          this.showToast(this.aiLanguage === 'en' ? 'Metadata change undone' : 'Metadata değişikliği geri alındı');
+        } catch (e) {
+          this.pushMetadataUndoEntry(entry);
+          this.chatError =
+            (this.aiLanguage === 'en'
+              ? 'Metadata undo error: '
+              : 'Metadata geri alma hatası: ') + e.message;
+          this.showToast(
+            this.aiLanguage === 'en'
+              ? 'Metadata undo failed'
+              : 'Metadata geri alınamadı'
           );
         } finally {
           this.metadataSaving = false;

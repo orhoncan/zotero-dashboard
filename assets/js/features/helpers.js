@@ -8,15 +8,115 @@
         return (v || "").toString().toLocaleLowerCase(locale);
       },
 
-      renderMd(text) {
+      formattingUtils() {
+        return window.ZoteroFormatting || {};
+      },
+
+      normalizeMarkdownForDisplay(text) {
+        const fn = this.formattingUtils().normalizeMarkdownForDisplay;
+        if (typeof fn === 'function') return fn(text);
+        return String(text || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+      },
+
+      postFormatAssistantOutput(text) {
+        const fn = this.formattingUtils().postFormatAssistantOutput;
+        if (typeof fn === 'function') return fn(text);
+        return this.normalizeMarkdownForDisplay(text);
+      },
+
+      extractSourceCardsFromText(text) {
+        const fn = this.formattingUtils().extractSourceCardsFromText;
+        if (typeof fn === 'function') return fn(text);
+        return [];
+      },
+
+      stripInlineSourceSection(text) {
+        const fn = this.formattingUtils().stripInlineSourceSection;
+        if (typeof fn === 'function') return fn(text);
+        return String(text || '');
+      },
+
+      renderMd(text, options = {}) {
         if (!text) return "";
         try {
-          const rendered = marked.parse(text);
+          const skipNormalize = !!options.skipNormalize;
+          const normalized = skipNormalize ? String(text || '') : this.normalizeMarkdownForDisplay(text);
+          const rendered = marked.parse(normalized, { gfm: true, breaks: true });
           return this.sanitizeHtml(rendered, { context: 'markdown' });
         } catch (e) {
           const escaped = this.escapeHtml(text);
           return this.sanitizeHtml(escaped, { context: 'markdown' });
         }
+      },
+
+      chatRenderCacheBucket() {
+        if (!this._chatRenderCache || typeof this._chatRenderCache !== 'object') {
+          this._chatRenderCache = {};
+        }
+        const keys = Object.keys(this._chatRenderCache);
+        if (keys.length > 220) {
+          const keep = {};
+          keys.slice(-140).forEach((key) => {
+            keep[key] = this._chatRenderCache[key];
+          });
+          this._chatRenderCache = keep;
+        }
+        return this._chatRenderCache;
+      },
+
+      simpleTextHash(value) {
+        const text = String(value || '');
+        let hash = 0;
+        for (let i = 0; i < text.length; i += 1) {
+          hash = ((hash << 5) - hash + text.charCodeAt(i)) | 0;
+        }
+        return String(hash >>> 0);
+      },
+
+      chatRenderCacheKey(text, index) {
+        return `${this.aiLanguage || 'tr'}:${index}:${this.simpleTextHash(text)}`;
+      },
+
+      renderAssistantMessageBundle(msg, index, options = {}) {
+        const role = String(msg?.role || '').toLowerCase();
+        const content = String(msg?.content || '');
+        if (role !== 'assistant') {
+          return { html: this.renderMd(content), cards: [], formatted: content };
+        }
+        const cache = this.chatRenderCacheBucket();
+        const key = this.chatRenderCacheKey(content, index);
+        if (!options.force && cache[key]) return cache[key];
+
+        const formatted = this.postFormatAssistantOutput(content);
+        const cards = (this.extractSourceCardsFromText(formatted) || []).map((row) => ({
+          title: String(row?.title || (this.aiLanguage === 'en' ? 'Source' : 'Kaynak')).trim(),
+          url: String(row?.url || '').trim(),
+          doi: String(row?.doi || '').trim(),
+          host: String(row?.host || '').trim(),
+          year: String(row?.year || '').trim(),
+        }));
+        const textForHtml = cards.length ? this.stripInlineSourceSection(formatted) : formatted;
+        const html = this.renderMd(textForHtml, { skipNormalize: true });
+
+        const payload = { html, cards, formatted: textForHtml };
+        cache[key] = payload;
+        return payload;
+      },
+
+      renderChatMessageHtml(msg, index) {
+        return this.renderAssistantMessageBundle(msg, index).html;
+      },
+
+      chatSourceCards(msg, index) {
+        return this.renderAssistantMessageBundle(msg, index).cards || [];
+      },
+
+      chatSourceCardMeta(card) {
+        const parts = [];
+        if (card?.year) parts.push(card.year);
+        if (card?.host) parts.push(card.host);
+        if (card?.doi) parts.push(`DOI: ${card.doi}`);
+        return parts.join(' • ');
       },
 
       escapeHtml(value) {

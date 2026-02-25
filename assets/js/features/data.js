@@ -196,11 +196,96 @@
         return ['zoteroDesktop', 'zoteroMcp', 'claudeCli', 'codexCli', 'geminiCli'];
       },
 
+      selfCheckRowOk(key) {
+        return String(this.selfCheck?.[key]?.status || '').toLowerCase() === 'ok';
+      },
+
+      selfCheckAnyCliOk() {
+        return ['claudeCli', 'codexCli', 'geminiCli'].some((key) => this.selfCheckRowOk(key));
+      },
+
+      aiPreflightState() {
+        if (!this.selfCheckRan) {
+          return {
+            ready: false,
+            code: 'CHECK_PENDING',
+            message: this.aiLanguage === 'en'
+              ? 'Self-check not completed yet.'
+              : 'Self-check henüz tamamlanmadı.',
+          };
+        }
+
+        if (String(this.selfCheckError || '').trim()) {
+          return {
+            ready: false,
+            code: 'CHECK_ERROR',
+            message: this.aiLanguage === 'en'
+              ? 'Self-check failed. Refresh checks before sending AI requests.'
+              : 'Self-check başarısız. AI isteği göndermeden önce kontrolü yenileyin.',
+          };
+        }
+
+        if (!this.selfCheckRowOk('zoteroDesktop')) {
+          return {
+            ready: false,
+            code: 'ZOTERO_DOWN',
+            message: this.aiLanguage === 'en'
+              ? 'Zotero Desktop is not reachable.'
+              : 'Zotero Desktop erişilemez durumda.',
+          };
+        }
+
+        if (!this.selfCheckRowOk('zoteroMcp')) {
+          return {
+            ready: false,
+            code: 'MCP_DOWN',
+            message: this.aiLanguage === 'en'
+              ? 'zotero-mcp is not ready.'
+              : 'zotero-mcp hazır değil.',
+          };
+        }
+
+        if (!this.selfCheckAnyCliOk()) {
+          return {
+            ready: false,
+            code: 'CLI_DOWN',
+            message: this.aiLanguage === 'en'
+              ? 'No AI CLI is healthy.'
+              : 'Sağlıklı AI CLI bulunamadı.',
+          };
+        }
+
+        return {
+          ready: true,
+          code: 'OK',
+          message: this.aiLanguage === 'en'
+            ? 'AI requests are ready.'
+            : 'AI istekleri hazır.',
+        };
+      },
+
+      aiPreflightReady() {
+        return this.aiPreflightState().ready;
+      },
+
+      aiPreflightMessage() {
+        return this.aiPreflightState().message;
+      },
+
       clearSelfCheckAutoHideTimer() {
         if (this._selfCheckAutoHideTimer) {
           clearTimeout(this._selfCheckAutoHideTimer);
           this._selfCheckAutoHideTimer = null;
         }
+      },
+
+      startSelfCheckPolling() {
+        if (this._selfCheckPollTimer) return;
+        const tick = () => {
+          if (document.hidden) return;
+          this.runStartupSelfCheck(false);
+        };
+        this._selfCheckPollTimer = setInterval(tick, 30000);
       },
 
       scheduleSelfCheckAutoHide(delayMs = 9000) {
@@ -237,6 +322,7 @@
             ...checks,
           };
           this.selfCheckRan = true;
+          this.selfCheckLastRunAt = Date.now();
           const checkOk = data?.ok === true;
           const hasIssue = Object.values(this.selfCheck || {}).some((row) => {
             const normalized = String(row?.status || 'unknown').toLowerCase();
@@ -255,6 +341,7 @@
           }
         } catch (e) {
           this.selfCheckRan = true;
+          this.selfCheckLastRunAt = Date.now();
           this.selfCheckError = e?.message || (this.aiLanguage === 'en' ? 'Self-check failed' : 'Self-check başarısız');
           this.selfCheckOpen = true;
           if (!forceOpen) {
@@ -262,6 +349,9 @@
           }
         } finally {
           this.selfCheckLoading = false;
+          if (typeof this.runChatTaskQueue === 'function' && this.aiPreflightReady()) {
+            this.runChatTaskQueue();
+          }
         }
       },
 
@@ -294,6 +384,9 @@
           if (typeof this.loadPipelineChunkLimitPreference === 'function') {
             this.loadPipelineChunkLimitPreference();
           }
+          if (typeof this.loadSourceRoutingModePreference === 'function') {
+            this.loadSourceRoutingModePreference();
+          }
           if (typeof this.loadListDensityPreference === 'function') {
             this.loadListDensityPreference();
           }
@@ -305,6 +398,9 @@
           }
           if (typeof this.runStartupSelfCheck === 'function') {
             await this.runStartupSelfCheck(false);
+          }
+          if (typeof this.startSelfCheckPolling === 'function') {
+            this.startSelfCheckPolling();
           }
           if (typeof this.refreshProviderHealth === 'function') {
             await this.refreshProviderHealth();

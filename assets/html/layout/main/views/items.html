@@ -1,6 +1,6 @@
-    <div x-show="connected && !loading && activeView==='items'" class="p-4" x-cloak>
-      <div class="flex items-center justify-between gap-3 mb-3">
-        <div class="flex items-center gap-2 flex-wrap">
+    <div x-show="connected && !loading && activeView==='items'" class="p-4 w-full min-w-0" x-cloak>
+      <div class="flex flex-wrap items-center gap-2 mb-3">
+        <div class="flex items-center gap-2 flex-wrap min-w-0">
           <template x-if="selectedCollection">
             <span class="tag-pill active flex items-center gap-1">
               <span x-text="getCollectionName(selectedCollection)"></span>
@@ -35,7 +35,7 @@
           </template>
           <span class="text-xs text-slate-500" x-text="displayItems.length + ' ' + (aiLanguage === 'en' ? 'results' : 'sonuç')"></span>
         </div>
-        <div class="flex items-center gap-2 shrink-0 flex-wrap justify-end">
+        <div class="flex items-center gap-2 flex-wrap ml-auto">
           <input type="text" x-model="localFilterQuery" @input="currentPage=1"
             :placeholder="aiLanguage === 'en' ? 'Quick local filter' : 'Lokal hızlı filtre'"
             class="w-44 bg-slate-800 border border-slate-600 rounded-md text-xs px-2 py-1 text-slate-300 focus:outline-none focus:border-red-500 placeholder-slate-500">
@@ -59,7 +59,7 @@
           <button @click="exportBibTeX()" :disabled="displayItems.length === 0"
             class="px-2.5 py-1 text-xs rounded-md border border-slate-600 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 transition">BibTeX</button>
           <button @click="compareSelectedItems()"
-            :disabled="selectedCompareKeys.length < 2 || selectedCompareKeys.length > 3 || chatLoading"
+            :disabled="selectedCompareKeys.length < 2 || selectedCompareKeys.length > 3 || !canSendAiRequest()"
             class="px-2.5 py-1 text-xs rounded-md border border-red-500/30 bg-red-500/20 hover:bg-red-500/30 disabled:opacity-40 transition">
             <span x-text="aiLanguage === 'en' ? 'Compare' : 'Karşılaştır'"></span>
             (<span x-text="selectedCompareKeys.length"></span>)
@@ -82,9 +82,9 @@
       </div>
 
       <!-- Items List -->
-      <div class="space-y-1" x-show="displayItems.length > 0">
+      <div class="space-y-1 w-full" x-show="displayItems.length > 0">
         <template x-for="item in paginatedItems" :key="item.key">
-          <div @click="selectItem(item)" class="card card-hover cursor-pointer transition fade-in flex gap-3 relative overflow-hidden"
+          <div @click="selectItem(item)" class="card card-hover cursor-pointer transition fade-in flex gap-3 relative overflow-hidden w-full"
             :class="[
               listDensity === 'compact' ? 'px-2.5 py-2 items-center' : 'p-3',
               selectedItem?.key === item.key ? 'border-red-500/50 bg-slate-800/80' : '',
@@ -103,7 +103,10 @@
             </div>
             <div class="flex-1 min-w-0">
               <h4 class="font-medium truncate" :class="listDensity === 'compact' ? 'text-[13px]' : 'text-sm'" x-text="item.data.title || (aiLanguage === 'en' ? 'Untitled' : 'Başlıksız')"></h4>
-              <div class="flex items-center gap-2" :class="listDensity === 'compact' ? 'mt-0 text-[11px]' : 'mt-0.5'">
+              <div
+                x-show="(item.data.creators && item.data.creators.length) || item.data.date || item.data.publicationTitle"
+                class="flex items-center gap-2"
+                :class="listDensity === 'compact' ? 'mt-0 text-[11px]' : 'mt-0.5'">
                 <span class="truncate" :class="listDensity === 'compact' ? 'text-[11px] text-slate-400' : 'text-xs text-slate-400'" x-text="formatAuthors(item.data.creators)"></span>
                 <span x-show="item.data.date" class="text-xs text-slate-500" x-text="extractYear(item.data.date)"></span>
                 <span x-show="item.data.publicationTitle" class="text-xs text-slate-500 italic truncate" x-text="item.data.publicationTitle"></span>

@@ -8,7 +8,9 @@ Then open http://localhost:8080
 import http.server
 import urllib.request
 import urllib.error
+import urllib.parse
 import json
+import html
 import os
 import re
 import hashlib
@@ -89,6 +91,11 @@ AI_RESPONSE_CACHE_TTL_SECONDS = {
     "balanced": 20 * 60,
     "deep": 30 * 60,
 }
+
+EXTERNAL_SEARCH_CACHE = {}
+EXTERNAL_SEARCH_CACHE_LOCK = threading.Lock()
+EXTERNAL_SEARCH_CACHE_MAX_ENTRIES = 600
+EXTERNAL_SEARCH_CACHE_TTL_SECONDS = 20 * 60
 
 TOOL_RESULT_CACHE = {}
 TOOL_RESULT_CACHE_LOCK = threading.Lock()
@@ -1039,8 +1046,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return ""
 
         normalized_provider = self.normalize_provider(provider)
-        lines = [line.strip() for line in content.split("\n")]
+        lines = content.split("\n")
         cleaned_lines = []
+        blank_run = 0
 
         gemini_noise = [
             r"^yolo mode is enabled",
@@ -1069,19 +1077,25 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             r"^-{3,}$",
         ]
 
-        for line in lines:
-            if not line:
+        for raw_line in lines:
+            check_line = str(raw_line or "").strip()
+            if not check_line:
+                blank_run += 1
+                if cleaned_lines and blank_run <= 2:
+                    cleaned_lines.append("")
                 continue
-            if self.is_process_meta_line(line):
+
+            blank_run = 0
+            if self.is_process_meta_line(check_line):
                 continue
-            lowered = line.lower()
+            lowered = check_line.lower()
             if normalized_provider == "gemini":
                 if any(re.search(pattern, lowered) for pattern in gemini_noise):
                     continue
             if normalized_provider == "codex":
                 if any(re.search(pattern, lowered) for pattern in codex_noise):
                     continue
-            cleaned_lines.append(line)
+            cleaned_lines.append(str(raw_line).rstrip())
 
         cleaned = "\n".join(cleaned_lines).strip()
         return cleaned
@@ -1269,6 +1283,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             TOOL_RESULT_CACHE.clear()
         with AI_RESPONSE_CACHE_LOCK:
             AI_RESPONSE_CACHE.clear()
+        with EXTERNAL_SEARCH_CACHE_LOCK:
+            EXTERNAL_SEARCH_CACHE.clear()
 
     def tool_cache_profile_for_path(self, path):
         raw = str(path or "")
@@ -1297,6 +1313,19 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             payload,
             ttl_seconds,
             TOOL_RESULT_CACHE_MAX_ENTRIES,
+        )
+
+    def get_cached_external_search_result(self, cache_key):
+        return self.cache_get(EXTERNAL_SEARCH_CACHE, EXTERNAL_SEARCH_CACHE_LOCK, cache_key)
+
+    def set_cached_external_search_result(self, cache_key, payload, ttl_seconds=EXTERNAL_SEARCH_CACHE_TTL_SECONDS):
+        self.cache_set(
+            EXTERNAL_SEARCH_CACHE,
+            EXTERNAL_SEARCH_CACHE_LOCK,
+            cache_key,
+            payload,
+            ttl_seconds,
+            EXTERNAL_SEARCH_CACHE_MAX_ENTRIES,
         )
 
     def normalize_item_key(self, raw_key):
@@ -1358,6 +1387,822 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         normalized = str(value or "").strip().lower()
         return normalized in {"1", "true", "yes", "on", "evet"}
 
+    def normalize_source_routing_mode(self, req_data):
+        data = req_data or {}
+        return self.as_bool(data.get("sourceRoutingMode", False)) or self.as_bool(data.get("forceSourceRouting", False))
+
+    def compact_external_text(self, value, max_len=260):
+        text = str(value or "")
+        if not text:
+            return ""
+        text = re.sub(r"<[^>]+>", " ", text)
+        text = html.unescape(text)
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        text = re.sub(r"\s+", " ", text).strip()
+        if not text:
+            return ""
+        max_chars = max(60, int(max_len or 260))
+        if len(text) <= max_chars:
+            return text
+        return f"{text[:max_chars - 1].rstrip()}…"
+
+    def extract_external_query_keywords(self, value, limit=8):
+        text = str(value or "").strip().lower()
+        if not text:
+            return []
+        tokens = re.findall(r"[a-zA-Z0-9ğüşöçıİĞÜŞÖÇ]{3,}", text)
+        if not tokens:
+            return []
+        stopwords = {
+            "this", "that", "these", "those", "with", "from", "about", "paper", "papers", "article", "articles",
+            "important", "other", "related", "work", "works", "recent", "latest", "last", "year", "years",
+            "what", "which", "show", "find", "sources", "source",
+            "bu", "şu", "konu", "konuyla", "konuda", "ilgili", "diğer", "önemli", "makale", "makaleler",
+            "kaynak", "kaynaklar", "neler", "nedir", "nedirler", "son", "yıl", "yılda", "yıldaki", "için",
+            "olarak", "hakkında", "üzerine", "ve", "veya",
+        }
+        result = []
+        seen = set()
+        for token in tokens:
+            clean = token.strip().lower()
+            if not clean or clean in stopwords:
+                continue
+            if clean.isdigit():
+                continue
+            if clean in seen:
+                continue
+            seen.add(clean)
+            result.append(clean)
+            if len(result) >= max(3, int(limit or 8)):
+                break
+        return result
+
+    def detect_external_year_floor(self, req_data, prompt):
+        data = req_data or {}
+        raw_message = str(data.get("userMessage", "") or "")
+        text = f"{raw_message}\n{str(prompt or '')}".lower()
+        current_year = datetime.utcnow().year
+        years_back = None
+
+        tr_match = re.search(r"son\s+(\d{1,2})\s*y[ıi]l", text, flags=re.IGNORECASE)
+        en_match = re.search(r"last\s+(\d{1,2})\s+years?", text, flags=re.IGNORECASE)
+        tr_month_match = re.search(r"son\s+(\d{1,2})\s*ay", text, flags=re.IGNORECASE)
+        en_month_match = re.search(r"(last|past)\s+(\d{1,2})\s+months?", text, flags=re.IGNORECASE)
+        if tr_match:
+            years_back = int(tr_match.group(1))
+        elif en_match:
+            years_back = int(en_match.group(1))
+        elif tr_month_match:
+            month_count = int(tr_month_match.group(1))
+            years_back = 1 if month_count <= 12 else max(1, int(round(month_count / 12.0)))
+        elif en_month_match:
+            month_count = int(en_month_match.group(2))
+            years_back = 1 if month_count <= 12 else max(1, int(round(month_count / 12.0)))
+        elif re.search(r"\b(son bir yıl|son 1 yıl|geçen yıl|last year|past year|past 12 months|last 12 months)\b", text, flags=re.IGNORECASE):
+            years_back = 1
+
+        if years_back is None:
+            return 0
+        years_back = max(1, min(10, int(years_back)))
+        if years_back == 1:
+            return max(1900, current_year - 1)
+        return max(1900, current_year - years_back + 1)
+
+    def build_external_query_candidates(self, req_data, prompt, primary_query):
+        query = self.compact_external_text(primary_query, max_len=260)
+        data = req_data or {}
+        selected_title = self.compact_external_text(data.get("selectedItemTitle", ""), max_len=180)
+        raw_message = str(data.get("userMessage", "") or "").strip()
+        keywords = self.extract_external_query_keywords(raw_message, limit=6)
+        title_keywords = self.extract_external_query_keywords(selected_title, limit=5)
+        year_floor = self.detect_external_year_floor(req_data, prompt)
+        current_year = datetime.utcnow().year
+
+        candidates = []
+        if query:
+            candidates.append(query)
+        if selected_title:
+            candidates.append(f"\"{selected_title}\"")
+            candidates.append(f"\"{selected_title}\" related work")
+            if title_keywords:
+                title_base = " ".join(title_keywords[:5]).strip()
+                if title_base:
+                    candidates.append(f"{title_base} related work")
+            if keywords:
+                candidates.append(f"\"{selected_title}\" {' '.join(keywords[:5])}")
+            if year_floor:
+                candidates.append(f"\"{selected_title}\" {year_floor} {current_year} recent related work")
+                if title_keywords:
+                    candidates.append(f"{' '.join(title_keywords[:5])} {year_floor} {current_year}")
+        elif keywords:
+            base = " ".join(keywords[:6]).strip()
+            if base:
+                candidates.append(base)
+                if year_floor:
+                    candidates.append(f"{base} {year_floor} {current_year}")
+        elif title_keywords:
+            base = " ".join(title_keywords[:5]).strip()
+            if base:
+                candidates.append(base)
+                candidates.append(f"{base} related work")
+                if year_floor:
+                    candidates.append(f"{base} {year_floor} {current_year}")
+
+        deduped = []
+        seen = set()
+        for item in candidates:
+            clean = self.compact_external_text(item, max_len=260)
+            if not clean:
+                continue
+            norm = clean.lower().strip()
+            if norm in seen:
+                continue
+            seen.add(norm)
+            deduped.append(clean)
+            if len(deduped) >= 4:
+                break
+        return deduped or ([query] if query else [])
+
+    def normalize_external_search_query(self, req_data, prompt):
+        data = req_data or {}
+        raw_message = str(data.get("userMessage", "") or "").strip()
+        selected_title = self.compact_external_text(data.get("selectedItemTitle", ""), max_len=180)
+
+        cleaned_message = re.sub(
+            r"\b(kaynak bul|find sources|özetle|summarize|notları analiz et|analyze notes|ilgili çalışmalar|related works|eleştirel değerlendirme|critical review)\b",
+            " ",
+            raw_message,
+            flags=re.IGNORECASE,
+        )
+        cleaned_message = self.compact_external_text(cleaned_message, max_len=180).strip(" :;,-")
+        extracted = self.extract_external_query_keywords(cleaned_message, limit=7)
+        cleaned_message = " ".join(extracted).strip()
+        if not cleaned_message and selected_title:
+            title_keywords = self.extract_external_query_keywords(selected_title, limit=5)
+            cleaned_message = " ".join(title_keywords).strip()
+
+        if not selected_title:
+            prompt_text = str(prompt or "")
+            quoted = re.search(r"[\"“”']([^\"“”']{8,220})[\"“”']", prompt_text)
+            if quoted:
+                selected_title = self.compact_external_text(quoted.group(1), max_len=180)
+
+        parts = []
+        if selected_title:
+            parts.append(f"\"{selected_title}\"")
+        if cleaned_message and cleaned_message.lower() != selected_title.lower():
+            parts.append(cleaned_message)
+
+        query = " ".join([part for part in parts if part]).strip()
+        if not query:
+            fallback = self.compact_external_text(prompt, max_len=220)
+            query = fallback
+        if len(query) > 260:
+            query = query[:260].strip()
+        return query
+
+    def external_seed_terms(self, req_data, prompt, query):
+        data = req_data or {}
+        selected_title = self.compact_external_text(data.get("selectedItemTitle", ""), max_len=180)
+        raw_message = str(data.get("userMessage", "") or "").strip()
+        prompt_head = str(prompt or "").split("\n\n", 1)[0]
+
+        terms = []
+        for source_text in [selected_title, raw_message, query, prompt_head]:
+            extracted = self.extract_external_query_keywords(source_text, limit=8)
+            for token in extracted:
+                clean = str(token or "").strip().lower()
+                if not clean or clean in terms:
+                    continue
+                terms.append(clean)
+                if len(terms) >= 12:
+                    return terms
+        return terms
+
+    def topical_term_hits_for_candidate(self, row, seed_terms):
+        if not isinstance(row, dict):
+            return 0
+        terms = seed_terms if isinstance(seed_terms, list) else []
+        if not terms:
+            return 0
+        title = self.compact_external_text(row.get("title", ""), max_len=320)
+        venue = self.compact_external_text(row.get("venue", ""), max_len=120)
+        abstract = self.compact_external_text(row.get("abstract", ""), max_len=360)
+        topics = row.get("topics") if isinstance(row.get("topics"), list) else []
+        topics_text = " ".join(self.compact_external_text(topic, max_len=50) for topic in topics[:10] if topic)
+        haystack = f"{title} {venue} {topics_text} {abstract}".lower()
+        if not haystack.strip():
+            return 0
+
+        hits = 0
+        for token in terms:
+            term = str(token or "").strip().lower()
+            if not term or len(term) < 3:
+                continue
+            if term in haystack:
+                hits += 1
+        return hits
+
+    def external_search_cache_key(self, query, language):
+        normalized_query = self.compact_external_text(query, max_len=260).lower()
+        lang = self.normalize_output_language(language) or "tr"
+        digest = hashlib.sha256(f"{lang}|{normalized_query}".encode("utf-8")).hexdigest()[:20]
+        return f"ext:{lang}:{digest}"
+
+    def fetch_json_url(self, url, timeout=8, headers=None):
+        req = urllib.request.Request(
+            str(url or ""),
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "Orhon-Zotero-Dashboard/0.0.3",
+                **(headers or {}),
+            },
+            method="GET",
+        )
+        with urllib.request.urlopen(req, timeout=max(2, int(timeout or 8))) as resp:
+            raw = resp.read().decode("utf-8", errors="replace").strip()
+            if not raw:
+                return {}
+            return json.loads(raw)
+
+    def normalize_external_doi(self, value):
+        doi = str(value or "").strip()
+        if not doi:
+            return ""
+        doi = doi.replace("https://doi.org/", "").replace("http://doi.org/", "")
+        return doi.strip().lower()
+
+    def is_valid_external_doi(self, doi):
+        candidate = self.normalize_external_doi(doi)
+        if not candidate:
+            return False
+        return bool(re.match(r"^10\.\d{4,9}/\S+$", candidate, flags=re.IGNORECASE))
+
+    def normalize_external_url(self, value):
+        url = str(value or "").strip()
+        if not url:
+            return ""
+        if url.startswith("doi:"):
+            doi_value = self.normalize_external_doi(url.split("doi:", 1)[1])
+            if doi_value:
+                return f"https://doi.org/{doi_value}"
+            return ""
+        if url.startswith("https://openalex.org/W") and "openalex.org/works/" not in url.lower():
+            work_id = url.rsplit("/", 1)[-1].strip()
+            if work_id:
+                return f"https://openalex.org/{work_id}"
+        if not re.match(r"^https?://", url, flags=re.IGNORECASE):
+            return ""
+        return url
+
+    def external_url_host(self, value):
+        url = self.normalize_external_url(value)
+        if not url:
+            return ""
+        try:
+            parsed = urllib.parse.urlparse(url)
+            host = str(parsed.netloc or "").lower().strip()
+            if host.startswith("www."):
+                host = host[4:]
+            return host
+        except Exception:
+            return ""
+
+    def is_trusted_academic_host(self, host):
+        candidate = str(host or "").lower().strip()
+        if not candidate:
+            return False
+        trusted_hosts = {
+            "doi.org",
+            "openalex.org",
+            "api.openalex.org",
+            "semanticscholar.org",
+            "api.semanticscholar.org",
+            "crossref.org",
+            "api.crossref.org",
+            "arxiv.org",
+            "pubmed.ncbi.nlm.nih.gov",
+            "ieeexplore.ieee.org",
+            "dl.acm.org",
+            "sciencedirect.com",
+            "link.springer.com",
+            "nature.com",
+            "science.org",
+            "jstor.org",
+            "tandfonline.com",
+            "onlinelibrary.wiley.com",
+            "cambridge.org",
+            "academic.oup.com",
+            "frontiersin.org",
+            "plos.org",
+            "mdpi.com",
+        }
+        if candidate in trusted_hosts:
+            return True
+        return any(candidate.endswith(f".{domain}") for domain in trusted_hosts)
+
+    def verify_external_candidate(self, row):
+        item = row if isinstance(row, dict) else {}
+        title = self.compact_external_text(item.get("title", ""), max_len=320)
+        if len(title) < 8:
+            return False, {}
+
+        year_raw = str(item.get("year") or "").strip()
+        year_ok = True
+        if year_raw:
+            try:
+                year_int = int(year_raw)
+                current_year = datetime.utcnow().year + 1
+                year_ok = 1900 <= year_int <= current_year
+            except Exception:
+                year_ok = False
+        if not year_ok:
+            return False, {}
+
+        sources = item.get("sources")
+        if not isinstance(sources, list) or not sources:
+            single_source = str(item.get("source", "")).strip().lower()
+            sources = [single_source] if single_source else []
+        sources = [str(src or "").strip().lower() for src in sources if str(src or "").strip()]
+        allowed_sources = {"openalex", "semantic", "crossref"}
+        if not sources or not all(src in allowed_sources for src in sources):
+            return False, {}
+
+        doi = self.normalize_external_doi(item.get("doi", ""))
+        url = self.normalize_external_url(item.get("url", ""))
+        doi_ok = self.is_valid_external_doi(doi)
+        host = self.external_url_host(url)
+        url_ok = bool(host and self.is_trusted_academic_host(host))
+        if not (doi_ok or url_ok):
+            return False, {}
+
+        verification = "DOI" if doi_ok else "URL"
+        if doi_ok and url_ok:
+            verification = "DOI+URL"
+        return True, {
+            "doi": doi,
+            "url": url,
+            "sources": sorted(set(sources)),
+            "verification": verification,
+        }
+
+    def normalize_external_paper(self, raw, source, query):
+        entry = raw if isinstance(raw, dict) else {}
+        src = str(source or "").strip().lower() or "web"
+        query_tokens = [
+            token for token in re.findall(r"[a-zA-Z0-9ğüşöçıİĞÜŞÖÇ]{4,}", str(query or "").lower())
+            if token not in {"with", "from", "that", "this", "paper", "source", "query", "için", "olan", "gibi", "veya"}
+        ][:10]
+
+        title = ""
+        year = ""
+        authors = []
+        venue = ""
+        abstract = ""
+        doi = ""
+        url = ""
+        citations = 0
+        topics = []
+
+        if src == "openalex":
+            title = self.compact_external_text(entry.get("title", ""), max_len=320)
+            year = str(entry.get("publication_year") or "")
+            authorships = entry.get("authorships") if isinstance(entry.get("authorships"), list) else []
+            for row in authorships[:5]:
+                author = row.get("author") if isinstance(row, dict) else {}
+                name = self.compact_external_text((author or {}).get("display_name", ""), max_len=80)
+                if name:
+                    authors.append(name)
+            primary_location = entry.get("primary_location") if isinstance(entry.get("primary_location"), dict) else {}
+            source_obj = primary_location.get("source") if isinstance(primary_location.get("source"), dict) else {}
+            venue = self.compact_external_text(source_obj.get("display_name", ""), max_len=120)
+            ids = entry.get("ids") if isinstance(entry.get("ids"), dict) else {}
+            doi = str(ids.get("doi") or "").strip()
+            if doi.lower().startswith("https://doi.org/"):
+                doi = doi.split("doi.org/", 1)[1]
+            url = str(entry.get("id") or "").strip()
+            citations = int(entry.get("cited_by_count") or 0)
+            concepts = entry.get("concepts") if isinstance(entry.get("concepts"), list) else []
+            topics = [self.compact_external_text((concept or {}).get("display_name", ""), max_len=50) for concept in concepts[:6]]
+            topics = [topic for topic in topics if topic]
+            abstract = ""
+        elif src == "crossref":
+            title_list = entry.get("title") if isinstance(entry.get("title"), list) else []
+            title = self.compact_external_text(title_list[0] if title_list else "", max_len=320)
+            year_parts = [None]
+            published_print = entry.get("published-print") if isinstance(entry.get("published-print"), dict) else {}
+            print_parts = published_print.get("date-parts") if isinstance(published_print.get("date-parts"), list) else []
+            if print_parts and isinstance(print_parts[0], list):
+                year_parts = print_parts[0]
+            if not year_parts or year_parts[0] is None:
+                published_online = entry.get("published-online") if isinstance(entry.get("published-online"), dict) else {}
+                online_parts = published_online.get("date-parts") if isinstance(published_online.get("date-parts"), list) else []
+                if online_parts and isinstance(online_parts[0], list):
+                    year_parts = online_parts[0]
+            year = str(year_parts[0] or "")
+            raw_authors = entry.get("author") if isinstance(entry.get("author"), list) else []
+            for author in raw_authors[:5]:
+                given = self.compact_external_text((author or {}).get("given", ""), max_len=40)
+                family = self.compact_external_text((author or {}).get("family", ""), max_len=40)
+                full_name = " ".join([part for part in [given, family] if part]).strip()
+                if full_name:
+                    authors.append(full_name)
+            container = entry.get("container-title") if isinstance(entry.get("container-title"), list) else []
+            venue = self.compact_external_text(container[0] if container else "", max_len=120)
+            doi = str(entry.get("DOI") or "").strip()
+            url = str(entry.get("URL") or (f"https://doi.org/{doi}" if doi else "")).strip()
+            citations = int(entry.get("is-referenced-by-count") or 0)
+            abstract = self.compact_external_text(entry.get("abstract", ""), max_len=260)
+            topics = []
+        else:
+            title = self.compact_external_text(entry.get("title", ""), max_len=320)
+            year = str(entry.get("year") or "")
+            raw_authors = entry.get("authors") if isinstance(entry.get("authors"), list) else []
+            for author in raw_authors[:5]:
+                if isinstance(author, dict):
+                    name = self.compact_external_text(author.get("name", ""), max_len=80)
+                else:
+                    name = self.compact_external_text(author, max_len=80)
+                if name:
+                    authors.append(name)
+            venue = self.compact_external_text(entry.get("venue", ""), max_len=120)
+            abstract = self.compact_external_text(entry.get("abstract", ""), max_len=260)
+            url = str(entry.get("url") or "").strip()
+            external_ids = entry.get("externalIds") if isinstance(entry.get("externalIds"), dict) else {}
+            doi = str(external_ids.get("DOI") or entry.get("doi") or "").strip()
+            citations = int(entry.get("citationCount") or 0)
+            fields = entry.get("fieldsOfStudy") if isinstance(entry.get("fieldsOfStudy"), list) else []
+            topics = [self.compact_external_text(topic, max_len=50) for topic in fields[:6] if topic]
+
+        if not title:
+            return None
+
+        normalized_title = re.sub(r"[^a-z0-9]+", "", title.lower())
+        relevance_hits = sum(1 for token in query_tokens if token and token in title.lower())
+        year_int = 0
+        try:
+            year_int = int(year)
+        except Exception:
+            year_int = 0
+        recency = 0
+        if year_int >= 2023:
+            recency = 8
+        elif year_int >= 2018:
+            recency = 5
+        elif year_int >= 2010:
+            recency = 2
+        citation_score = min(26, int(citations / 20)) if citations > 0 else 0
+        source_bonus = {"semantic": 6, "openalex": 5, "crossref": 3}.get(src, 1)
+        relevance_score = (relevance_hits * 8) + recency + citation_score + source_bonus
+
+        normalized_doi = self.normalize_external_doi(doi)
+        normalized_url = self.normalize_external_url(url)
+        return {
+            "source": src,
+            "sources": [src],
+            "title": title,
+            "titleKey": normalized_title,
+            "year": year,
+            "authors": authors,
+            "venue": venue,
+            "abstract": abstract,
+            "doi": normalized_doi,
+            "url": normalized_url,
+            "citations": citations,
+            "topics": [topic for topic in topics if topic],
+            "score": relevance_score,
+        }
+
+    def fetch_openalex_candidates(self, query, limit=8):
+        encoded_query = urllib.parse.quote_plus(str(query or ""))
+        url = f"https://api.openalex.org/works?search={encoded_query}&per-page={max(2, int(limit or 8))}&sort=relevance_score:desc"
+        payload = self.fetch_json_url(url, timeout=6)
+        rows = payload.get("results") if isinstance(payload, dict) else []
+        if not isinstance(rows, list):
+            return []
+        return rows[:max(2, int(limit or 8))]
+
+    def fetch_crossref_candidates(self, query, limit=8):
+        encoded_query = urllib.parse.quote_plus(str(query or ""))
+        url = (
+            "https://api.crossref.org/works?"
+            f"query.bibliographic={encoded_query}&rows={max(2, int(limit or 8))}&sort=relevance&order=desc"
+        )
+        payload = self.fetch_json_url(url, timeout=6)
+        message = payload.get("message") if isinstance(payload, dict) else {}
+        rows = message.get("items") if isinstance(message, dict) else []
+        if not isinstance(rows, list):
+            return []
+        return rows[:max(2, int(limit or 8))]
+
+    def fetch_semantic_scholar_candidates(self, query, limit=8):
+        encoded_query = urllib.parse.quote_plus(str(query or ""))
+        fields = "title,year,authors,venue,abstract,citationCount,url,externalIds,fieldsOfStudy"
+        url = (
+            "https://api.semanticscholar.org/graph/v1/paper/search?"
+            f"query={encoded_query}&limit={max(2, int(limit or 8))}&fields={urllib.parse.quote_plus(fields)}"
+        )
+        payload = self.fetch_json_url(url, timeout=6)
+        rows = payload.get("data") if isinstance(payload, dict) else []
+        if not isinstance(rows, list):
+            return []
+        return rows[:max(2, int(limit or 8))]
+
+    def dedupe_and_rank_external_candidates(self, rows):
+        deduped = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            key = str(row.get("doi") or "").strip().lower()
+            if not key:
+                key = f"{row.get('titleKey', '')}:{row.get('year', '')}"
+            if not key:
+                continue
+            existing = deduped.get(key)
+            if existing is None:
+                deduped[key] = dict(row)
+                continue
+            keep = dict(existing)
+            alt = dict(row)
+            if float(alt.get("score", 0)) > float(keep.get("score", 0)):
+                keep, alt = alt, keep
+
+            keep_sources = keep.get("sources") if isinstance(keep.get("sources"), list) else [keep.get("source", "")]
+            alt_sources = alt.get("sources") if isinstance(alt.get("sources"), list) else [alt.get("source", "")]
+            merged_sources = sorted(
+                set(
+                    str(src or "").strip().lower()
+                    for src in [*keep_sources, *alt_sources]
+                    if str(src or "").strip()
+                )
+            )
+            keep["sources"] = merged_sources
+            if merged_sources:
+                keep["source"] = merged_sources[0]
+
+            if not str(keep.get("doi", "")).strip() and str(alt.get("doi", "")).strip():
+                keep["doi"] = alt.get("doi", "")
+            if not str(keep.get("url", "")).strip() and str(alt.get("url", "")).strip():
+                keep["url"] = alt.get("url", "")
+            keep["citations"] = max(int(keep.get("citations") or 0), int(alt.get("citations") or 0))
+
+            keep_topics = keep.get("topics") if isinstance(keep.get("topics"), list) else []
+            alt_topics = alt.get("topics") if isinstance(alt.get("topics"), list) else []
+            topic_set = []
+            seen_topics = set()
+            for topic in [*keep_topics, *alt_topics]:
+                clean = self.compact_external_text(topic, max_len=50)
+                if not clean or clean in seen_topics:
+                    continue
+                seen_topics.add(clean)
+                topic_set.append(clean)
+            keep["topics"] = topic_set[:10]
+
+            keep_authors = keep.get("authors") if isinstance(keep.get("authors"), list) else []
+            alt_authors = alt.get("authors") if isinstance(alt.get("authors"), list) else []
+            if len(alt_authors) > len(keep_authors):
+                keep["authors"] = alt_authors
+            deduped[key] = keep
+        ranked = sorted(deduped.values(), key=lambda item: float(item.get("score", 0)), reverse=True)
+        return ranked
+
+    def extract_external_topics(self, rows, limit=8):
+        scores = {}
+        for row in rows:
+            topics = row.get("topics") if isinstance(row, dict) else []
+            if not isinstance(topics, list):
+                continue
+            for topic in topics[:8]:
+                clean = self.compact_external_text(topic, max_len=50)
+                if not clean:
+                    continue
+                scores[clean] = scores.get(clean, 0) + 1
+        ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+        return [name for name, _ in ranked[:max(3, int(limit or 8))]]
+
+    def collect_external_candidates(self, query, per_source_limit=8):
+        sources = [
+            ("openalex", self.fetch_openalex_candidates),
+            ("semantic", self.fetch_semantic_scholar_candidates),
+            ("crossref", self.fetch_crossref_candidates),
+        ]
+        collected = []
+        lock = threading.Lock()
+
+        def run_source(source_name, fetcher):
+            try:
+                rows = fetcher(query, limit=per_source_limit)
+            except Exception:
+                rows = []
+            normalized = []
+            for raw in rows:
+                item = self.normalize_external_paper(raw, source_name, query)
+                if item:
+                    normalized.append(item)
+            if not normalized:
+                return
+            with lock:
+                collected.extend(normalized)
+
+        threads = []
+        for source_name, fetcher in sources:
+            thread = threading.Thread(target=run_source, args=(source_name, fetcher), daemon=True)
+            thread.start()
+            threads.append(thread)
+        for thread in threads:
+            thread.join(timeout=6.5)
+        return collected
+
+    def build_external_search_context(self, req_data, prompt, target_language="", on_event=None):
+        query = self.normalize_external_search_query(req_data, prompt)
+        if not query:
+            return {"used": False, "query": "", "count": 0, "topics": [], "context": ""}
+        query_candidates = self.build_external_query_candidates(req_data, prompt, query)
+        year_floor = self.detect_external_year_floor(req_data, prompt)
+        cache_basis = " || ".join(query_candidates) if query_candidates else query
+        cache_key = self.external_search_cache_key(f"{cache_basis}::y{year_floor or 0}", target_language)
+        cached = self.get_cached_external_search_result(cache_key)
+        if cached and isinstance(cached, dict):
+            return {
+                "used": bool(cached.get("count", 0)),
+                "query": str(cached.get("query", query)),
+                "count": int(cached.get("count", 0)),
+                "topics": list(cached.get("topics", []) or []),
+                "context": str(cached.get("context", "")),
+                "cached": True,
+            }
+
+        if on_event:
+            on_event(
+                {
+                    "type": "meta",
+                    "phase": "external_search_start",
+                    "query": query,
+                    "queryVariants": query_candidates[:4],
+                    "yearFloor": int(year_floor or 0),
+                }
+            )
+
+        candidates = []
+        per_query_limit = 6 if len(query_candidates) > 1 else 8
+        for candidate_query in query_candidates[:4]:
+            candidates.extend(self.collect_external_candidates(candidate_query, per_source_limit=per_query_limit))
+        ranked_raw = self.dedupe_and_rank_external_candidates(candidates)[:12]
+        verified = []
+        seed_terms = self.external_seed_terms(req_data, prompt, query)
+        for row in ranked_raw:
+            ok, verification = self.verify_external_candidate(row)
+            if not ok:
+                continue
+            enriched = dict(row)
+            enriched["doi"] = verification.get("doi", enriched.get("doi", ""))
+            enriched["url"] = verification.get("url", enriched.get("url", ""))
+            enriched["sources"] = verification.get("sources", enriched.get("sources", []))
+            enriched["verification"] = verification.get("verification", "")
+            topic_hits = self.topical_term_hits_for_candidate(enriched, seed_terms)
+            if topic_hits > 0:
+                enriched["score"] = float(enriched.get("score", 0)) + min(18, topic_hits * 6)
+            enriched["_topicHits"] = int(topic_hits)
+            verified.append(enriched)
+        verified.sort(
+            key=lambda item: (
+                int(item.get("_topicHits", 0)),
+                float(item.get("score", 0)),
+                int(item.get("citations", 0)),
+            ),
+            reverse=True,
+        )
+
+        relevant_verified = [row for row in verified if int(row.get("_topicHits", 0)) > 0]
+        ranked = relevant_verified[:8] if relevant_verified else verified[:8]
+        verification_rejected = max(0, len(ranked_raw) - len(verified))
+        recent_relaxed = False
+        if year_floor:
+            recent_ranked = []
+            for row in ranked:
+                try:
+                    row_year = int(str(row.get("year") or "").strip())
+                except Exception:
+                    row_year = 0
+                if row_year >= int(year_floor):
+                    recent_ranked.append(row)
+            if recent_ranked:
+                ranked = recent_ranked[:8]
+            elif ranked:
+                recent_relaxed = True
+        topics = self.extract_external_topics(ranked, limit=8)
+        lang = self.normalize_output_language(target_language)
+
+        if not ranked:
+            if lang == "en":
+                context_lines = [
+                    "WEB SCHOLARLY SEARCH:",
+                    f"- Query: {query}",
+                    "- No fully verified direct record was retrieved in this turn.",
+                ]
+                if verification_rejected > 0:
+                    context_lines.append("- Retrieved items failed DOI/URL verification.")
+                if year_floor:
+                    context_lines.append(f"- Requested time window: {year_floor}-{datetime.utcnow().year}.")
+                context_lines.append("- Continue with Zotero context and provide a direct academic synthesis.")
+                context_lines.append("- If evidence is limited, mark it as inference and do not invent citations.")
+                context = "\n".join(context_lines)
+            else:
+                context_lines = [
+                    "WEB AKADEMİK ARAMA:",
+                    f"- Sorgu: {query}",
+                    "- Bu turda tam doğrulanmış doğrudan kayıt bulunamadı.",
+                ]
+                if verification_rejected > 0:
+                    context_lines.append("- Gelen kayıtlar DOI/URL doğrulamasını geçemedi.")
+                if year_floor:
+                    context_lines.append(f"- İstenen zaman aralığı: {year_floor}-{datetime.utcnow().year}.")
+                context_lines.append("- Zotero bağlamıyla devam et ve doğrudan akademik sentez üret.")
+                context_lines.append("- Kanıt sınırlıysa bunu çıkarım olarak etiketle; uydurma atıf verme.")
+                context = "\n".join(context_lines)
+            payload = {"query": query, "count": 0, "topics": [], "context": context}
+            self.set_cached_external_search_result(cache_key, payload, EXTERNAL_SEARCH_CACHE_TTL_SECONDS)
+            if on_event:
+                on_event({"type": "meta", "phase": "external_search_done", "count": 0})
+            return {"used": False, "query": query, "count": 0, "topics": [], "context": context, "cached": False}
+
+        lines = []
+        if lang == "en":
+            lines.append("WEB SCHOLARLY SEARCH (retrieved live):")
+            lines.append(f"- Query: {query}")
+            if len(query_candidates) > 1:
+                lines.append(f"- Query variants used: {len(query_candidates[:4])}")
+            lines.append("- Scope: Academic-only sources (OpenAlex, Semantic Scholar, Crossref)")
+            lines.append("- Validation: Each listed item passed DOI/URL verification")
+            if year_floor:
+                lines.append(f"- Requested time window: {year_floor}-{datetime.utcnow().year}")
+            if recent_relaxed:
+                lines.append("- No verified records were found strictly in the requested window; closest verified records are shown.")
+            if topics:
+                lines.append(f"- Topics: {', '.join(topics[:8])}")
+            lines.append("- Highlighted papers:")
+        else:
+            lines.append("WEB AKADEMİK ARAMA (canlı getirildi):")
+            lines.append(f"- Sorgu: {query}")
+            if len(query_candidates) > 1:
+                lines.append(f"- Kullanılan sorgu varyantı: {len(query_candidates[:4])}")
+            lines.append("- Kapsam: Yalnız akademik kaynaklar (OpenAlex, Semantic Scholar, Crossref)")
+            lines.append("- Doğrulama: Listelenen her kayıt DOI/URL kontrolünden geçti")
+            if year_floor:
+                lines.append(f"- İstenen zaman aralığı: {year_floor}-{datetime.utcnow().year}")
+            if recent_relaxed:
+                lines.append("- İstenen aralıkta doğrulanmış kayıt bulunamadı; en yakın doğrulanmış kayıtlar gösterildi.")
+            if topics:
+                lines.append(f"- Konular: {', '.join(topics[:8])}")
+            lines.append("- Öne çıkan çalışmalar:")
+
+        for idx, row in enumerate(ranked, start=1):
+            title = row.get("title", "")
+            year = row.get("year", "") or "-"
+            venue = row.get("venue", "") or "-"
+            authors = ", ".join((row.get("authors") or [])[:4]) or "-"
+            citations = row.get("citations", 0)
+            doi = row.get("doi", "")
+            url = row.get("url", "")
+            abstract = row.get("abstract", "")
+            source_list = row.get("sources") if isinstance(row.get("sources"), list) else [row.get("source", "")]
+            source = ", ".join(str(src or "").upper() for src in source_list if str(src or "").strip()) or "-"
+            verification = str(row.get("verification", "")).strip()
+
+            lines.append(f"{idx}) {title} ({year})")
+            lines.append(f"   - Source: {source}")
+            lines.append(f"   - Authors: {authors}")
+            lines.append(f"   - Venue: {venue}")
+            if verification:
+                lines.append(f"   - Verification: {verification}")
+            if citations:
+                lines.append(f"   - Citations: {citations}")
+            if doi:
+                lines.append(f"   - DOI: {doi}")
+            if url:
+                lines.append(f"   - URL: {url}")
+            if abstract:
+                lines.append(f"   - Abstract snippet: {self.compact_external_text(abstract, max_len=220)}")
+
+        if lang == "en":
+            lines.append("Synthesize a direct academic answer from Zotero context and this list.")
+            lines.append("If evidence is limited, explicitly mark inferences and avoid invented citations.")
+        else:
+            lines.append("Zotero bağlamı ve bu listeyle doğrudan akademik yanıtı sentezle.")
+            lines.append("Kanıt sınırlıysa çıkarımı açıkça işaretle ve uydurma atıf üretme.")
+
+        context = "\n".join(lines).strip()
+        payload = {
+            "query": query,
+            "count": len(ranked),
+            "topics": topics,
+            "context": context,
+        }
+        self.set_cached_external_search_result(cache_key, payload, EXTERNAL_SEARCH_CACHE_TTL_SECONDS)
+        if on_event:
+            on_event({"type": "meta", "phase": "external_search_done", "count": len(ranked), "topics": topics[:8]})
+        return {"used": True, "query": query, "count": len(ranked), "topics": topics, "context": context, "cached": False}
+
     def is_big_pdf_pipeline_requested(self, req_data):
         return self.as_bool((req_data or {}).get("bigPdfPipeline", False))
 
@@ -1373,9 +2218,60 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         return "PDF'nin tamamını ayrıntılı analiz et."
 
     def normalize_pipeline_template(self, raw_template):
-        allowed = {"study", "presentation", "review", "thesis_notes", "policy_brief"}
+        allowed = {"none", "study", "presentation", "review", "thesis_notes", "policy_brief"}
         candidate = str(raw_template or "").strip().lower()
-        return candidate if candidate in allowed else "study"
+        return candidate if candidate in allowed else "none"
+
+    def strip_prompt_directive_block(self, prompt, headers):
+        text = str(prompt or "")
+        if not text:
+            return ""
+        header_tokens = [str(header or "").strip() for header in (headers or []) if str(header or "").strip()]
+        if not header_tokens:
+            return text.strip()
+        pattern = re.compile(
+            r"(?:^|\n)(?:" + "|".join(re.escape(token) for token in header_tokens) + r")\s*",
+            flags=re.IGNORECASE,
+        )
+        cut_idx = -1
+        for match in pattern.finditer(text):
+            cut_idx = match.start()
+        if cut_idx < 0:
+            return text.strip()
+        return text[:cut_idx].rstrip()
+
+    def apply_template_rule_from_request(self, prompt, req_data, target_language):
+        headers = ["OUTPUT TEMPLATE:", "ÇIKTI ŞABLONU:"]
+        base = self.strip_prompt_directive_block(prompt, headers)
+        return base
+
+    def source_routing_instruction(self, target_language):
+        lang = self.normalize_output_language(target_language)
+        if lang == "en":
+            return (
+                "Run external scholarly lookup automatically based on the current request when Zotero context is not enough.\n"
+                "Do not output search-plan/query-suggestion sections unless the user explicitly asks for queries.\n"
+                "Use only academic sources and verify each cited item before presenting it.\n"
+                "If external evidence is limited, continue with an academic synthesis using Zotero context and clearly label inferences.\n"
+                "Return a direct evidence-based answer and include a short source list (title, year, DOI/URL)."
+            )
+        return (
+            "Zotero bağlamı yetmezse mevcut isteğe göre dış akademik aramayı otomatik çalıştır.\n"
+            "Kullanıcı açıkça istemedikçe arama planı/sorgu önerisi bölümü üretme.\n"
+            "Yalnız akademik kaynak kullan ve sunmadan önce her kaynağı doğrula.\n"
+            "Dış kanıt sınırlıysa Zotero bağlamıyla akademik bir sentezle devam et ve çıkarımı açıkça etiketle.\n"
+            "Kanıta dayalı doğrudan yanıt ver ve kısa kaynak listesi ekle (başlık, yıl, DOI/URL)."
+        )
+
+    def apply_source_routing_rule_from_request(self, prompt, req_data, target_language):
+        headers = ["EXTERNAL SOURCE ROUTING:", "DIŞ KAYNAK YÖNLENDİRME:"]
+        base = self.strip_prompt_directive_block(prompt, headers)
+        if not self.normalize_source_routing_mode(req_data):
+            return base
+        lang = self.normalize_output_language(target_language)
+        header = "EXTERNAL SOURCE ROUTING:" if lang == "en" else "DIŞ KAYNAK YÖNLENDİRME:"
+        instruction = self.source_routing_instruction(target_language)
+        return f"{base}\n\n{header}\n- {instruction}".strip()
 
     def normalize_pipeline_chunk_limit(self, raw_limit):
         candidate = str(raw_limit or "").strip().lower()
@@ -1461,6 +2357,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def pipeline_template_instruction(self, template, target_language):
         lang = self.normalize_output_language(target_language)
         normalized = self.normalize_pipeline_template(template)
+        if normalized == "none":
+            return ""
         if lang == "en":
             mapping = {
                 "study": (
@@ -1718,7 +2616,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             "max_source_chars": 6400 * 9,
             "chunk_analysis_mode": "balanced",
         }
-        pipeline_template = self.normalize_pipeline_template((req_data or {}).get("pipelineTemplate", "study"))
+        pipeline_template = "none"
         requested_chunk_limit = self.normalize_pipeline_chunk_limit((req_data or {}).get("pipelineChunkLimit", "auto"))
         if requested_chunk_limit > 0:
             config["max_chunks"] = requested_chunk_limit
@@ -2018,13 +2916,20 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         provider_token = self.normalize_provider(provider)
         model_token = str(model or "").strip().lower() or "default"
         prompt_hash = hashlib.sha256(str(prompt or "").encode("utf-8")).hexdigest()[:24]
+        source_routing = self.normalize_source_routing_mode(req_data)
+        source_query = self.normalize_external_search_query(req_data, prompt) if source_routing else ""
+        source_token = "sr0"
+        if source_routing:
+            source_hash = hashlib.sha256(source_query.encode("utf-8")).hexdigest()[:12] if source_query else "empty"
+            source_token = f"sr1:{source_hash}"
+        template_token = "tpl:none"
         if self.is_big_pdf_pipeline_requested(req_data):
-            template = self.normalize_pipeline_template((req_data or {}).get("pipelineTemplate", "study"))
+            template = "none"
             chunk_limit = self.normalize_pipeline_chunk_limit((req_data or {}).get("pipelineChunkLimit", "auto"))
             pipeline_token = f"bp2:{template}:{chunk_limit or 'auto'}"
         else:
             pipeline_token = "std"
-        return f"{scope}|{base_token}|{provider_token}|{model_token}|{mode_token}|{pipeline_token}|{prompt_hash}"
+        return f"{scope}|{base_token}|{provider_token}|{model_token}|{mode_token}|{pipeline_token}|{template_token}|{source_token}|{prompt_hash}"
 
     def ai_response_cache_ttl_seconds(self, analysis_mode):
         mode = self.normalize_analysis_mode(analysis_mode)
@@ -2848,6 +3753,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     "pipelineTemplate": cached.get("pipelineTemplate", ""),
                     "pipelineChunkMode": cached.get("pipelineChunkMode", ""),
                     "pipelineFinalMode": cached.get("pipelineFinalMode", ""),
+                    "externalSearchUsed": bool(cached.get("externalSearchUsed", False)),
+                    "externalSearchQuery": str(cached.get("externalSearchQuery", "")),
+                    "externalSearchCount": int(cached.get("externalSearchCount", 0)),
+                    "externalSearchTopics": list(cached.get("externalSearchTopics", []) or []),
                     "cached": True,
                     "cacheTtlSec": ttl_left,
                     "deduped": False,
@@ -2877,9 +3786,38 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         status = 500
         payload = {"error": "Bilinmeyen hata", "provider": provider}
         try:
+            effective_prompt = self.apply_template_rule_from_request(prompt, req_data, output_language)
+            if not pipeline_requested:
+                effective_prompt = self.apply_source_routing_rule_from_request(effective_prompt, req_data, output_language)
+            else:
+                effective_prompt = self.strip_prompt_directive_block(
+                    effective_prompt,
+                    ["EXTERNAL SOURCE ROUTING:", "DIŞ KAYNAK YÖNLENDİRME:"],
+                )
+            external_search_meta = {
+                "used": False,
+                "query": "",
+                "count": 0,
+                "topics": [],
+            }
+            if self.normalize_source_routing_mode(req_data) and not pipeline_requested:
+                try:
+                    external_search_meta = self.build_external_search_context(req_data, effective_prompt, output_language)
+                    external_context = str(external_search_meta.get("context") or "").strip()
+                    if external_context:
+                        effective_prompt = f"{effective_prompt}\n\n{external_context}"
+                except Exception as e:
+                    external_search_meta = {
+                        "used": False,
+                        "query": self.normalize_external_search_query(req_data, effective_prompt),
+                        "count": 0,
+                        "topics": [],
+                        "error": str(e)[:200],
+                    }
+
             if not pipeline_requested:
                 run_result = self.execute_with_provider_fallback(
-                    prompt,
+                    effective_prompt,
                     provider,
                     model,
                     analysis_mode=analysis_mode,
@@ -2899,7 +3837,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     if not self.should_fallback_from_pipeline_error(e):
                         raise
                     run_result = self.execute_with_provider_fallback(
-                        prompt,
+                        effective_prompt,
                         provider,
                         model,
                         analysis_mode=analysis_mode,
@@ -2930,6 +3868,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     "providerUsed": provider_used,
                     "fallbackUsed": fallback_used,
                     "pipelineUsed": pipeline_used,
+                    "externalSearchUsed": bool(external_search_meta.get("used", False)),
+                    "externalSearchQuery": str(external_search_meta.get("query", "")),
+                    "externalSearchCount": int(external_search_meta.get("count", 0)),
+                    "externalSearchTopics": list(external_search_meta.get("topics", []) or []),
                 }
                 if status == 429:
                     payload["code"] = "RATE_LIMIT"
@@ -2976,6 +3918,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         "pipelineTemplate": run_result.get("pipelineTemplate", ""),
                         "pipelineChunkMode": run_result.get("pipelineChunkMode", ""),
                         "pipelineFinalMode": run_result.get("pipelineFinalMode", ""),
+                        "externalSearchUsed": bool(external_search_meta.get("used", False)),
+                        "externalSearchQuery": str(external_search_meta.get("query", "")),
+                        "externalSearchCount": int(external_search_meta.get("count", 0)),
+                        "externalSearchTopics": list(external_search_meta.get("topics", []) or []),
                     },
                     self.ai_response_cache_ttl_seconds(analysis_mode),
                 )
@@ -2991,6 +3937,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 "pipelineTemplate": run_result.get("pipelineTemplate", ""),
                 "pipelineChunkMode": run_result.get("pipelineChunkMode", ""),
                 "pipelineFinalMode": run_result.get("pipelineFinalMode", ""),
+                "externalSearchUsed": bool(external_search_meta.get("used", False)),
+                "externalSearchQuery": str(external_search_meta.get("query", "")),
+                "externalSearchCount": int(external_search_meta.get("count", 0)),
+                "externalSearchTopics": list(external_search_meta.get("topics", []) or []),
                 "cached": False,
                 "deduped": False,
             }
@@ -3074,6 +4024,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     "pipelineTemplate": cached.get("pipelineTemplate", ""),
                     "pipelineChunkMode": cached.get("pipelineChunkMode", ""),
                     "pipelineFinalMode": cached.get("pipelineFinalMode", ""),
+                    "externalSearchUsed": bool(cached.get("externalSearchUsed", False)),
+                    "externalSearchQuery": str(cached.get("externalSearchQuery", "")),
+                    "externalSearchCount": int(cached.get("externalSearchCount", 0)),
+                    "externalSearchTopics": list(cached.get("externalSearchTopics", []) or []),
                     "cached": True,
                     "cacheTtlSec": ttl_left,
                     "deduped": False,
@@ -3120,6 +4074,20 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         stream_chunks = []
         stream_provider = {"name": provider}
         stream_filter_state = {"buffer": "", "direct_mode": False}
+        effective_prompt = self.apply_template_rule_from_request(prompt, req_data, output_language)
+        if not pipeline_requested:
+            effective_prompt = self.apply_source_routing_rule_from_request(effective_prompt, req_data, output_language)
+        else:
+            effective_prompt = self.strip_prompt_directive_block(
+                effective_prompt,
+                ["EXTERNAL SOURCE ROUTING:", "DIŞ KAYNAK YÖNLENDİRME:"],
+            )
+        external_search_meta = {
+            "used": False,
+            "query": "",
+            "count": 0,
+            "topics": [],
+        }
 
         def on_chunk(chunk):
             content = str(chunk or "")
@@ -3145,9 +4113,29 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             emit(event_payload)
 
         try:
+            if self.normalize_source_routing_mode(req_data) and not pipeline_requested:
+                try:
+                    external_search_meta = self.build_external_search_context(
+                        req_data,
+                        effective_prompt,
+                        output_language,
+                        on_event=on_event,
+                    )
+                    external_context = str(external_search_meta.get("context") or "").strip()
+                    if external_context:
+                        effective_prompt = f"{effective_prompt}\n\n{external_context}"
+                except Exception as e:
+                    external_search_meta = {
+                        "used": False,
+                        "query": self.normalize_external_search_query(req_data, effective_prompt),
+                        "count": 0,
+                        "topics": [],
+                        "error": str(e)[:200],
+                    }
+
             if not pipeline_requested:
                 run_result = self.execute_with_provider_fallback(
-                    prompt,
+                    effective_prompt,
                     provider,
                     model,
                     analysis_mode=analysis_mode,
@@ -3177,7 +4165,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         }
                     )
                     run_result = self.execute_with_provider_fallback(
-                        prompt,
+                        effective_prompt,
                         provider,
                         model,
                         analysis_mode=analysis_mode,
@@ -3216,6 +4204,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     "providerUsed": provider_used,
                     "fallbackUsed": fallback_used,
                     "pipelineUsed": pipeline_used,
+                    "externalSearchUsed": bool(external_search_meta.get("used", False)),
+                    "externalSearchQuery": str(external_search_meta.get("query", "")),
+                    "externalSearchCount": int(external_search_meta.get("count", 0)),
+                    "externalSearchTopics": list(external_search_meta.get("topics", []) or []),
                 }
                 if status == 429:
                     payload["code"] = "RATE_LIMIT"
@@ -3254,6 +4246,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         "pipelineTemplate": run_result.get("pipelineTemplate", ""),
                         "pipelineChunkMode": run_result.get("pipelineChunkMode", ""),
                         "pipelineFinalMode": run_result.get("pipelineFinalMode", ""),
+                        "externalSearchUsed": bool(external_search_meta.get("used", False)),
+                        "externalSearchQuery": str(external_search_meta.get("query", "")),
+                        "externalSearchCount": int(external_search_meta.get("count", 0)),
+                        "externalSearchTopics": list(external_search_meta.get("topics", []) or []),
                     },
                     self.ai_response_cache_ttl_seconds(analysis_mode),
                 )
@@ -3269,6 +4265,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 "pipelineTemplate": run_result.get("pipelineTemplate", ""),
                 "pipelineChunkMode": run_result.get("pipelineChunkMode", ""),
                 "pipelineFinalMode": run_result.get("pipelineFinalMode", ""),
+                "externalSearchUsed": bool(external_search_meta.get("used", False)),
+                "externalSearchQuery": str(external_search_meta.get("query", "")),
+                "externalSearchCount": int(external_search_meta.get("count", 0)),
+                "externalSearchTopics": list(external_search_meta.get("topics", []) or []),
                 "cached": False,
                 "deduped": False,
             }
