@@ -10,7 +10,9 @@
       },
 
       applyTheme() {
-        document.documentElement.classList.toggle('theme-light', this.theme === 'light');
+        const isLight = this.theme === 'light';
+        document.documentElement.classList.toggle('theme-light', isLight);
+        document.documentElement.classList.toggle('dark', !isLight);
       },
     };
   });

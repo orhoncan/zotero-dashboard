@@ -77,7 +77,115 @@
         return ['fast', 'balanced', 'deep'].includes(mode) ? mode : 'balanced';
       },
 
-      chatScopeKey(itemKey = this.selectedItem?.key || '__global__', provider = this.aiProvider, model = this.aiModel, mode = this.aiAnalysisMode) {
+      normalizeChatTopic(topic) {
+        const allowed = ['general', 'summary', 'notes', 'literature', 'critique', 'sources'];
+        const normalized = String(topic || '').trim().toLowerCase();
+        return allowed.includes(normalized) ? normalized : 'general';
+      },
+
+      chatTopicStorageKey() {
+        return 'zotero-chat-topic-v1';
+      },
+
+      chatTopicOptions() {
+        if (this.aiLanguage === 'en') {
+          return [
+            { value: 'general', label: 'General' },
+            { value: 'summary', label: 'Summary' },
+            { value: 'notes', label: 'Notes' },
+            { value: 'literature', label: 'Literature' },
+            { value: 'critique', label: 'Critique' },
+            { value: 'sources', label: 'Sources' },
+          ];
+        }
+        return [
+          { value: 'general', label: 'Genel' },
+          { value: 'summary', label: 'Özet' },
+          { value: 'notes', label: 'Notlar' },
+          { value: 'literature', label: 'Literatür' },
+          { value: 'critique', label: 'Eleştiri' },
+          { value: 'sources', label: 'Kaynak' },
+        ];
+      },
+
+      chatTopicLabel(topic = this.chatTopic) {
+        const normalized = this.normalizeChatTopic(topic);
+        const row = this.chatTopicOptions().find((opt) => opt.value === normalized);
+        return row?.label || (this.aiLanguage === 'en' ? 'General' : 'Genel');
+      },
+
+      loadChatTopicPreference() {
+        let next = 'general';
+        try {
+          const saved = localStorage.getItem(this.chatTopicStorageKey());
+          if (saved) next = saved;
+        } catch (e) {
+          // no-op
+        }
+        this.chatTopic = this.normalizeChatTopic(next);
+      },
+
+      persistChatTopicPreference() {
+        this.chatTopic = this.normalizeChatTopic(this.chatTopic);
+        try {
+          localStorage.setItem(this.chatTopicStorageKey(), this.chatTopic);
+        } catch (e) {
+          // no-op
+        }
+      },
+
+      onChatTopicChange() {
+        const lock = this.activeRequestScopeLock();
+        if (lock) {
+          const lockedTopic = this.normalizeChatTopic(lock.topic || this.chatTopic);
+          if (this.chatTopic !== lockedTopic) {
+            this.chatTopic = lockedTopic;
+          }
+          this.showScopeLockToast('topic');
+          return;
+        }
+        this.chatTopic = this.normalizeChatTopic(this.chatTopic);
+        this.persistChatTopicPreference();
+        this.applyChatStateFromCache(this.currentChatScopeKey());
+        this.runChatTaskQueue();
+      },
+
+      quickPromptTopic(type) {
+        const map = {
+          summarize: 'summary',
+          notes: 'notes',
+          related: 'literature',
+          critique: 'critique',
+          sources: 'sources',
+        };
+        return map[type] || 'general';
+      },
+
+      setChatTopic(nextTopic, options = {}) {
+        const normalized = this.normalizeChatTopic(nextTopic);
+        if (!normalized) return;
+        const lock = this.activeRequestScopeLock();
+        if (lock) {
+          const lockedTopic = this.normalizeChatTopic(lock.topic || this.chatTopic);
+          if (normalized !== lockedTopic) {
+            this.chatTopic = lockedTopic;
+            this.showScopeLockToast('topic');
+          }
+          return;
+        }
+        if (this.chatTopic === normalized) return;
+        if (options.persistCurrent !== false) {
+          this.persistChatForCurrentItem();
+        }
+        this.chatTopic = normalized;
+        this.persistChatTopicPreference();
+        this.applyChatStateFromCache(this.currentChatScopeKey());
+        if (!options.skipQueue) {
+          this.runChatTaskQueue();
+        }
+      },
+
+      legacyChatScopeKey(itemKey = this.selectedItem?.key || '__global__', provider = this.aiProvider, model = this.aiModel, mode = this.aiAnalysisMode) {
         const safeItemKey = String(itemKey || '__global__');
         const safeProvider = this.normalizeAiProvider(provider);
         const safeModel = this.normalizeAiModel(model);
@@ -85,8 +193,111 @@
         return `${safeItemKey}::${safeProvider}::${safeModel}::${safeMode}`;
       },
 
+      chatScopeKey(
+        itemKey = this.selectedItem?.key || '__global__',
+        provider = this.aiProvider,
+        model = this.aiModel,
+        mode = this.aiAnalysisMode,
+        topic = this.chatTopic
+      ) {
+        const base = this.legacyChatScopeKey(itemKey, provider, model, mode);
+        const safeTopic = this.normalizeChatTopic(topic);
+        return `${base}::${safeTopic}`;
+      },
+
       currentChatScopeKey() {
-        return this.chatScopeKey(this.selectedItem?.key || '__global__', this.aiProvider, this.aiModel, this.aiAnalysisMode);
+        return this.chatScopeKey(
+          this.selectedItem?.key || '__global__',
+          this.aiProvider,
+          this.aiModel,
+          this.aiAnalysisMode,
+          this.chatTopic
+        );
+      },
+
+      normalizeRequestScopeLock(raw) {
+        const row = raw && typeof raw === 'object' ? raw : {};
+        return {
+          token: String(row.token || ''),
+          itemKey: String(row.itemKey || this.selectedItem?.key || ''),
+          provider: this.normalizeAiProvider(row.provider || this.aiProvider),
+          model: typeof row.model === 'string' ? row.model : (this.aiModel || ''),
+          analysisMode: this.normalizeAiAnalysisMode(row.analysisMode || this.aiAnalysisMode),
+          topic: this.normalizeChatTopic(row.topic || this.chatTopic),
+          scopeKey: String(row.scopeKey || this.currentChatScopeKey()),
+          startedAt: Number(row.startedAt || Date.now()),
+        };
+      },
+
+      setRequestScopeLock(raw = {}) {
+        const lock = this.normalizeRequestScopeLock({
+          ...raw,
+          token: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          startedAt: Date.now(),
+        });
+        this._requestScopeLock = lock;
+        return lock.token;
+      },
+
+      clearRequestScopeLock(token = '') {
+        const current = this._requestScopeLock;
+        if (!current) return;
+        const expected = String(token || '');
+        if (expected && current.token && current.token !== expected) return;
+        this._requestScopeLock = null;
+      },
+
+      requestScopeLockFromRunningTask() {
+        const task = typeof this.currentChatTask === 'function' ? this.currentChatTask() : null;
+        if (!task || String(task.status || '') !== 'running') return null;
+        return this.normalizeRequestScopeLock({
+          itemKey: task.itemKey || this.selectedItem?.key || '',
+          provider: task.options?.provider || this.aiProvider,
+          model: typeof task.options?.model === 'string' ? task.options.model : (this.aiModel || ''),
+          analysisMode: task.options?.analysisMode || this.aiAnalysisMode,
+          topic: task.topic || this.chatTopic,
+          scopeKey: task.scopeKey || this.currentChatScopeKey(),
+          startedAt: task.startedAt || Date.now(),
+        });
+      },
+
+      activeRequestScopeLock() {
+        if (this._requestScopeLock && typeof this._requestScopeLock === 'object') {
+          return this.normalizeRequestScopeLock(this._requestScopeLock);
+        }
+        if (this.chatLoading || this.activeChatTaskId) {
+          return this.requestScopeLockFromRunningTask();
+        }
+        return null;
+      },
+
+      requestScopeLockFieldLabel(field = '') {
+        const key = String(field || '').toLowerCase();
+        if (this.aiLanguage === 'en') {
+          const labels = {
+            topic: 'Topic',
+            provider: 'Provider',
+            model: 'Model',
+            mode: 'Mode',
+          };
+          return labels[key] || 'Setting';
+        }
+        const labels = {
+          topic: 'Konu',
+          provider: 'Sağlayıcı',
+          model: 'Model',
+          mode: 'Mod',
+        };
+        return labels[key] || 'Ayar';
+      },
+
+      showScopeLockToast(field = '') {
+        const label = this.requestScopeLockFieldLabel(field);
+        this.showToast(
+          this.aiLanguage === 'en'
+            ? `${label} is locked while the response is in progress`
+            : `${label}, yanıt sürerken kilitlidir`
+        );
       },
 
       clearChatScopesForItem(itemKey = this.selectedItem?.key || '__global__') {
@@ -101,11 +312,28 @@
 
       applyChatStateFromCache(cacheKey) {
         const requestedKey = String(cacheKey || this.currentChatScopeKey());
-        const normalizedKey = requestedKey.includes('::')
-          ? requestedKey
-          : this.chatScopeKey(requestedKey, this.aiProvider, this.aiModel, this.aiAnalysisMode);
-        const itemFallbackKey = requestedKey.includes('::') ? requestedKey.split('::')[0] : requestedKey;
-        const hitKey = this.chatCache?.[normalizedKey] ? normalizedKey : (this.chatCache?.[itemFallbackKey] ? itemFallbackKey : '');
+        const parts = requestedKey.includes('::') ? requestedKey.split('::') : [];
+        let normalizedKey = requestedKey;
+        if (!requestedKey.includes('::')) {
+          normalizedKey = this.chatScopeKey(
+            requestedKey,
+            this.aiProvider,
+            this.aiModel,
+            this.aiAnalysisMode,
+            this.chatTopic
+          );
+        } else if (parts.length === 4) {
+          normalizedKey = `${parts.join('::')}::${this.normalizeChatTopic(this.chatTopic)}`;
+        } else if (parts.length >= 5) {
+          normalizedKey = this.chatScopeKey(parts[0], parts[1], parts[2], parts[3], parts[4]);
+        }
+
+        const legacyNoTopicKey = normalizedKey.split('::').slice(0, 4).join('::');
+        const candidates = [normalizedKey];
+        if (legacyNoTopicKey && legacyNoTopicKey !== normalizedKey && this.chatCache?.[legacyNoTopicKey]) {
+          candidates.push(legacyNoTopicKey);
+        }
+        const hitKey = candidates.find((key) => key && this.chatCache?.[key]) || '';
         const cachedRaw = hitKey ? this.chatCache?.[hitKey] : null;
         const cached = this.normalizeCacheEntry(cachedRaw || {});
 
@@ -116,11 +344,16 @@
         this.sanitizeAiContextKeys();
 
         if (hitKey) {
-          this.chatCache[hitKey] = {
+          const now = this.nowMs();
+          const updated = {
             ...cached,
-            lastAccessedAt: this.nowMs(),
-            savedAt: cached.savedAt || this.nowMs(),
+            lastAccessedAt: now,
+            savedAt: cached.savedAt || now,
           };
+          this.chatCache[hitKey] = updated;
+          if (hitKey === legacyNoTopicKey && normalizedKey && normalizedKey !== legacyNoTopicKey) {
+            this.chatCache[normalizedKey] = updated;
+          }
           this.persistChatCacheToStorage({ skipPrune: false, silent: true });
         }
       },
@@ -134,7 +367,7 @@
           this.chatCache = parsed;
           this.pruneChatCache({ skipPersist: true });
           if (!this.selectedItem) {
-            this.applyChatStateFromCache(this.chatScopeKey('__global__', this.aiProvider, this.aiModel, this.aiAnalysisMode));
+            this.applyChatStateFromCache(this.currentChatScopeKey());
           }
         } catch (e) {
           // no-op
@@ -262,6 +495,252 @@
 
       sourceRoutingModeStorageKey() {
         return 'zotero-source-routing-mode';
+      },
+
+      contextPrefetchTtlMs() {
+        return 1000 * 60 * 12;
+      },
+
+      contextPrefetchMaxEntries() {
+        return 220;
+      },
+
+      pruneContextPrefetchCache() {
+        const now = this.nowMs();
+        const ttlMs = this.contextPrefetchTtlMs();
+        const maxEntries = this.contextPrefetchMaxEntries();
+        const rows = Object.entries(this.contextPrefetchCache || {})
+          .map(([key, value]) => ({ key, value: value || {}, ts: Number(value?.updatedAt || 0) }))
+          .filter((row) => row.ts > 0 && now - row.ts <= ttlMs);
+        rows.sort((a, b) => b.ts - a.ts);
+        const next = {};
+        rows.slice(0, maxEntries).forEach((row) => {
+          next[row.key] = row.value;
+        });
+        this.contextPrefetchCache = next;
+      },
+
+      contextPrefetchEntry(itemKey) {
+        const key = String(itemKey || '').trim();
+        if (!key) return null;
+        return this.contextPrefetchCache?.[key] || null;
+      },
+
+      isContextPrefetchFresh(itemKey, ttlMs = this.contextPrefetchTtlMs()) {
+        const entry = this.contextPrefetchEntry(itemKey);
+        if (!entry) return false;
+        const updatedAt = Number(entry.updatedAt || 0);
+        if (!updatedAt) return false;
+        return this.nowMs() - updatedAt <= Math.max(1000, Number(ttlMs || 0));
+      },
+
+      stripContextHtml(value) {
+        return String(value || '')
+          .replace(/<[^>]*>/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+      },
+
+      extractZoteroFulltextContent(payload) {
+        const candidates = [];
+        const collect = (node) => {
+          if (node === null || node === undefined) return;
+          if (typeof node === 'string') {
+            const text = this.stripContextHtml(node);
+            if (text.length >= 80) candidates.push(text);
+            return;
+          }
+          if (Array.isArray(node)) {
+            node.slice(0, 24).forEach((item) => collect(item));
+            return;
+          }
+          if (typeof node === 'object') {
+            const preferredKeys = ['content', 'text', 'body', 'fulltext', 'fullText'];
+            preferredKeys.forEach((key) => {
+              if (Object.prototype.hasOwnProperty.call(node, key)) collect(node[key]);
+            });
+            Object.entries(node).forEach(([key, value]) => {
+              if (preferredKeys.includes(key)) return;
+              if (typeof value === 'string') {
+                const text = this.stripContextHtml(value);
+                if (text.length >= 120) candidates.push(text);
+              }
+            });
+          }
+        };
+
+        collect(payload);
+        if (!candidates.length) return '';
+        return candidates.sort((a, b) => b.length - a.length)[0] || '';
+      },
+
+      contextEvidenceSampleLimit() {
+        return 6000;
+      },
+
+      async ensureContextEvidenceReady(items = [], options = {}) {
+        const list = Array.isArray(items) ? items : [];
+        const unique = [];
+        const seen = new Set();
+        list.forEach((item) => {
+          const key = String(item?.key || item || '').trim();
+          if (!key || seen.has(key)) return;
+          seen.add(key);
+          unique.push(item);
+        });
+        if (!unique.length) return [];
+        return Promise.all(unique.map((item) => this.prefetchItemContext(item, options)));
+      },
+
+      async prefetchItemContext(item, options = {}) {
+        const key = String(item?.key || item || '').trim();
+        if (!key) return null;
+        const force = !!options.force;
+        const ttlMs = Math.max(60 * 1000, Number(options.ttlMs || this.contextPrefetchTtlMs()));
+        if (!force && this.isContextPrefetchFresh(key, ttlMs)) {
+          return this.contextPrefetchEntry(key);
+        }
+
+        const inflight = this._contextPrefetchInFlight?.[key];
+        if (inflight) return inflight;
+
+        const itemObj = typeof item === 'object'
+          ? item
+          : (typeof this.findItemByKey === 'function' ? this.findItemByKey(key) : null);
+        const apiBase = this.zoteroItemApiBase(itemObj || this.selectedItem);
+        const endpoints = [
+          { name: 'metadata', url: `${apiBase}/items/${key}?format=json` },
+          { name: 'children', url: `${apiBase}/items/${key}/children?format=json` },
+          { name: 'fulltext', url: `${apiBase}/items/${key}/fulltext?format=json` },
+        ];
+
+        const runner = (async () => {
+          const startedAt = this.nowMs();
+          const settled = await Promise.allSettled(
+            endpoints.map(async (row) => {
+              if (typeof this.fetchJsonAbsolute === 'function') {
+                const response = await this.fetchJsonAbsolute(row.url);
+                return { name: row.name, data: response?.data };
+              }
+              const res = await fetch(row.url);
+              if (!res.ok) {
+                throw new Error(`${row.name}: API ${res.status}`);
+              }
+              const data = await res.json();
+              return { name: row.name, data };
+            })
+          );
+
+          const metadataPayload = settled.find((row) => row.status === 'fulfilled' && row.value?.name === 'metadata');
+          const childrenPayload = settled.find((row) => row.status === 'fulfilled' && row.value?.name === 'children');
+          const directFulltextPayload = settled.find((row) => row.status === 'fulfilled' && row.value?.name === 'fulltext');
+          const metadataData = metadataPayload?.value?.data?.data || itemObj?.data || {};
+          const children = Array.isArray(childrenPayload?.value?.data) ? childrenPayload.value.data : [];
+          const noteCount = children.filter((row) => row?.data?.itemType === 'note').length;
+          const annotationCount = children.filter((row) => row?.data?.itemType === 'annotation').length;
+          const noteTexts = children
+            .filter((row) => row?.data?.itemType === 'note')
+            .map((row) => this.stripContextHtml(row?.data?.note || ''))
+            .filter(Boolean)
+            .slice(0, 6);
+          const annotationTexts = children
+            .filter((row) => row?.data?.itemType === 'annotation')
+            .map((row) => {
+              const selectedText = this.stripContextHtml(row?.data?.annotationText || '');
+              const comment = this.stripContextHtml(row?.data?.annotationComment || '');
+              return [selectedText, comment].filter(Boolean).join(' | ');
+            })
+            .filter(Boolean)
+            .slice(0, 8);
+          const abstractText = this.stripContextHtml(metadataData?.abstractNote || metadataData?.abstract || '');
+
+          let fulltextText = this.extractZoteroFulltextContent(directFulltextPayload?.value?.data);
+          let fulltextSourceKey = fulltextText ? key : '';
+
+          if (!fulltextText) {
+            const attachmentKeys = children
+              .filter((row) => {
+                const itemType = String(row?.data?.itemType || '').toLowerCase();
+                const contentType = String(row?.data?.contentType || '').toLowerCase();
+                return itemType === 'attachment' && contentType === 'application/pdf';
+              })
+              .map((row) => String(row?.key || row?.data?.key || '').trim())
+              .filter(Boolean);
+
+            for (const attachmentKey of attachmentKeys.slice(0, 6)) {
+              try {
+                const response = typeof this.fetchJsonAbsolute === 'function'
+                  ? await this.fetchJsonAbsolute(`${apiBase}/items/${attachmentKey}/fulltext?format=json`)
+                  : await fetch(`${apiBase}/items/${attachmentKey}/fulltext?format=json`).then(async (res) => {
+                      if (!res.ok) throw new Error(`attachment fulltext: API ${res.status}`);
+                      return { data: await res.json() };
+                    });
+                const candidate = this.extractZoteroFulltextContent(response?.data);
+                if (!candidate) continue;
+                fulltextText = candidate;
+                fulltextSourceKey = attachmentKey;
+                break;
+              } catch (e) {
+                // Continue to the next attachment.
+              }
+            }
+          }
+
+          const fulltextSample = fulltextText
+            ? fulltextText.slice(0, this.contextEvidenceSampleLimit()).trim()
+            : '';
+          const result = {
+            itemKey: key,
+            updatedAt: this.nowMs(),
+            durationMs: Math.max(0, this.nowMs() - startedAt),
+            metadataOk: settled.some((row) => row.status === 'fulfilled' && row.value?.name === 'metadata'),
+            childrenOk: settled.some((row) => row.status === 'fulfilled' && row.value?.name === 'children'),
+            fulltextOk: Boolean(fulltextSample),
+            fulltextSourceKey,
+            fulltextLength: fulltextText.length,
+            fulltextSample,
+            abstractText,
+            notesSample: noteTexts.join('\n'),
+            annotationsSample: annotationTexts.join('\n'),
+            noteCount,
+            annotationCount,
+          };
+
+          this.contextPrefetchCache = {
+            ...(this.contextPrefetchCache || {}),
+            [key]: result,
+          };
+          this.pruneContextPrefetchCache();
+          return result;
+        })().catch((error) => {
+          const result = {
+            itemKey: key,
+            updatedAt: this.nowMs(),
+            durationMs: 0,
+            metadataOk: false,
+            childrenOk: false,
+            fulltextOk: false,
+            noteCount: 0,
+            annotationCount: 0,
+            error: String(error?.message || ''),
+          };
+          this.contextPrefetchCache = {
+            ...(this.contextPrefetchCache || {}),
+            [key]: result,
+          };
+          this.pruneContextPrefetchCache();
+          return result;
+        }).finally(() => {
+          if (this._contextPrefetchInFlight?.[key]) {
+            delete this._contextPrefetchInFlight[key];
+          }
+        });
+
+        this._contextPrefetchInFlight = {
+          ...(this._contextPrefetchInFlight || {}),
+          [key]: runner,
+        };
+        return runner;
       },
 
       pipelineTemplateOptions() {
@@ -590,12 +1069,42 @@
 
       analysisModeContextConfig(mode = this.aiAnalysisMode) {
         if (mode === 'fast') {
-          return { abstractMax: 380, noteCount: 1, noteMax: 120, abstractSentences: 2, noteSentences: 1 };
+          return {
+            abstractMax: 380,
+            noteCount: 1,
+            noteMax: 120,
+            abstractSentences: 2,
+            noteSentences: 1,
+            fulltextMax: 520,
+            fulltextSentences: 3,
+            annotationMax: 140,
+            annotationSentences: 1,
+          };
         }
         if (mode === 'deep') {
-          return { abstractMax: 2500, noteCount: 6, noteMax: 760, abstractSentences: 10, noteSentences: 5 };
+          return {
+            abstractMax: 2500,
+            noteCount: 6,
+            noteMax: 760,
+            abstractSentences: 10,
+            noteSentences: 5,
+            fulltextMax: 2200,
+            fulltextSentences: 10,
+            annotationMax: 520,
+            annotationSentences: 4,
+          };
         }
-        return { abstractMax: 1200, noteCount: 3, noteMax: 320, abstractSentences: 6, noteSentences: 3 };
+        return {
+          abstractMax: 1200,
+          noteCount: 3,
+          noteMax: 320,
+          abstractSentences: 6,
+          noteSentences: 3,
+          fulltextMax: 1200,
+          fulltextSentences: 6,
+          annotationMax: 260,
+          annotationSentences: 2,
+        };
       },
 
       truncateContextText(value, maxLen) {
@@ -692,9 +1201,9 @@
 
       languagePurityDirective() {
         if (this.aiLanguage === 'en') {
-          return 'Language rule: Write ONLY in English with proper English grammar, punctuation, and wording. Do not use Turkish words, except unavoidable proper nouns from the source text. Do not include process narration such as "I now have enough content" or "I will now produce the output".';
+          return 'Language rule: Write ONLY in English with proper English grammar, punctuation, and wording. Do not use Turkish words, except unavoidable proper nouns from the source text. Do not include process narration such as "I now have enough content" or "I will now produce the output". Do not output tool-call traces, plan updates, command traces, or JSON/debug blocks.';
         }
-        return 'Dil kuralı: YANITI TAMAMEN Türkçe yaz. Türkçe dilbilgisi, noktalama ve anlatım kurallarına uy. Kaynak metindeki zorunlu özel adlar dışında yabancı kelime kullanma. "Yeterli içerik elde ettim" veya "Çıktıyı şimdi üretiyorum" gibi süreç cümleleri yazma.';
+        return 'Dil kuralı: YANITI TAMAMEN Türkçe yaz. Türkçe dilbilgisi, noktalama ve anlatım kurallarına uy. Kaynak metindeki zorunlu özel adlar dışında yabancı kelime kullanma. "Yeterli içerik elde ettim" veya "Çıktıyı şimdi üretiyorum" gibi süreç cümleleri yazma. Araç çağrı izi, plan güncellemesi, komut izi veya JSON/hata ayıklama blokları yazma.';
       },
 
       sourceGroundingDirective(supportsMcp = false) {
@@ -702,33 +1211,57 @@
         if (this.aiLanguage === 'en') {
           if (routingEnabled) {
             return supportsMcp
-              ? 'Grounding rule: Prioritize the provided Zotero context and verified scholarly evidence retrieved in this turn. If evidence is limited, provide a concise academic synthesis and clearly label inferences. Never invent citations.'
-              : 'Grounding rule: Prioritize the provided Zotero context and verified scholarly evidence in this prompt. If evidence is limited, provide a concise academic synthesis and clearly label inferences. Never invent citations.';
+              ? 'Grounding rule: Prioritize the provided Zotero context and verified scholarly evidence retrieved in this turn. If evidence is limited, provide a concise academic synthesis and clearly label inferences. Never invent citations. If a detail is missing, mention that briefly in the relevant section instead of adding a generic opening or closing caveat.'
+              : 'Grounding rule: Prioritize the provided Zotero context and verified scholarly evidence in this prompt. If evidence is limited, provide a concise academic synthesis and clearly label inferences. Never invent citations. If a detail is missing, mention that briefly in the relevant section instead of adding a generic opening or closing caveat.';
           }
           if (supportsMcp) {
-            return 'Grounding rule: Use ONLY the provided Zotero context and the text returned by Zotero MCP tools in this turn. Do not use outside knowledge. If information is missing in the available text, explicitly say it is missing.';
+            return 'Grounding rule: Use ONLY the provided Zotero context and the text returned by Zotero MCP tools in this turn. Do not use outside knowledge. If information is missing, state that briefly only where it matters; do not add generic caveat paragraphs.';
           }
-          return 'Grounding rule: Use ONLY the provided Zotero context in this prompt. Do not add outside knowledge. If information is missing in the context, explicitly say it is missing.';
+          return 'Grounding rule: Use ONLY the provided Zotero context in this prompt. Do not add outside knowledge. If information is missing, state that briefly only where it matters; do not add generic caveat paragraphs.';
         }
         if (routingEnabled) {
           return supportsMcp
-            ? 'Kaynak kuralı: Verilen Zotero bağlamını ve bu turda getirilen doğrulanmış akademik kanıtları önceliklendir. Kanıt sınırlıysa kısa bir akademik sentez üret ve çıkarımları açıkça etiketle. Uydurma atıf üretme.'
-            : 'Kaynak kuralı: Prompttaki Zotero bağlamını ve doğrulanmış akademik kanıtları önceliklendir. Kanıt sınırlıysa kısa bir akademik sentez üret ve çıkarımları açıkça etiketle. Uydurma atıf üretme.';
+            ? 'Kaynak kuralı: Verilen Zotero bağlamını ve bu turda getirilen doğrulanmış akademik kanıtları önceliklendir. Kanıt sınırlıysa kısa bir akademik sentez üret ve çıkarımları açıkça etiketle. Uydurma atıf üretme. Eksik bilgi varsa bunu yalnız ilgili bölümde kısa biçimde belirt; başta veya sonda genel uyarı paragrafı yazma.'
+            : 'Kaynak kuralı: Prompttaki Zotero bağlamını ve doğrulanmış akademik kanıtları önceliklendir. Kanıt sınırlıysa kısa bir akademik sentez üret ve çıkarımları açıkça etiketle. Uydurma atıf üretme. Eksik bilgi varsa bunu yalnız ilgili bölümde kısa biçimde belirt; başta veya sonda genel uyarı paragrafı yazma.';
         }
         if (supportsMcp) {
-          return 'Kaynak kuralı: SADECE bu turda verilen Zotero bağlamı ve Zotero MCP araçlarından dönen metni kullan. Dış bilgi ekleme. Bilgi yoksa açıkça bilgi eksik olduğunu belirt.';
+          return 'Kaynak kuralı: SADECE bu turda verilen Zotero bağlamı ve Zotero MCP araçlarından dönen metni kullan. Dış bilgi ekleme. Bilgi eksikse bunu yalnız ilgili bölümde kısa biçimde belirt; genel uyarı paragrafı yazma.';
         }
-        return 'Kaynak kuralı: SADECE bu promptta verilen Zotero bağlamını kullan. Dış bilgi ekleme. Bağlamda bilgi yoksa açıkça bilgi eksik olduğunu belirt.';
+        return 'Kaynak kuralı: SADECE bu promptta verilen Zotero bağlamını kullan. Dış bilgi ekleme. Bağlamda bilgi yoksa bunu yalnız ilgili bölümde kısa biçimde belirt; genel uyarı paragrafı yazma.';
+      },
+
+      evidenceUseDirective() {
+        if (this.aiLanguage === 'en') {
+          return 'Evidence rule: The Zotero context may include abstracts, notes, annotations, and PDF-derived full-text excerpts. Treat PDF-derived excerpts as valid textual evidence. Do not claim that only bibliographic metadata is available unless the prompt truly contains only metadata.';
+        }
+        return 'Kanıt kuralı: Zotero bağlamı özet, not, annotation ve PDF\'den çıkarılmış tam metin kırpıntıları içerebilir. PDF kökenli metin kırpıntılarını geçerli metinsel kanıt olarak kullan. Prompt gerçekten yalnız metadata içermiyorsa "yalnız bibliyografik üst veri var" deme.';
+      },
+
+      responsePresentationDirective() {
+        if (this.aiLanguage === 'en') {
+          return 'Presentation rule: Write clean Markdown with short section headings, compact paragraphs, and bullets where useful. Prefer headings such as "## Shared Themes" or "## Differences". Avoid long dense text blocks and avoid generic intro/outro notes.';
+        }
+        return 'Sunum kuralı: Temiz Markdown kullan; kısa bölüm başlıkları, kompakt paragraflar ve gerektiğinde maddeler yaz. Mümkünse "## Benzerlikler" veya "## Farklılıklar" gibi başlıklar kullan. Uzun ve sıkışık metin bloklarından kaçın; genel giriş/kapanış notu yazma.';
+      },
+
+      sourceListFormattingDirective() {
+        if (this.aiLanguage === 'en') {
+          return 'Formatting rule: In source lists, keep source titles in their original language and script. Write titles as plain text; do not wrap titles with markdown emphasis symbols (**, __, [], ()).';
+        }
+        return 'Biçim kuralı: Kaynak listesindeki başlıkları özgün dilinde ve yazımında koru. Başlıkları düz metin yaz; markdown vurgu işaretleri (**, __, [ ], ( )) kullanma.';
       },
 
       outputConstraintDirective(supportsMcp = false) {
         const mode = this.analysisModeDirective(supportsMcp);
         const language = this.languagePurityDirective();
         const grounding = this.sourceGroundingDirective(supportsMcp);
+        const evidence = this.evidenceUseDirective();
+        const presentation = this.responsePresentationDirective();
+        const formatRule = this.sourceListFormattingDirective();
         if (this.aiLanguage === 'en') {
-          return `MANDATORY OUTPUT RULES:\n- ${mode}\n- ${language}\n- ${grounding}`;
+          return `MANDATORY OUTPUT RULES:\n- ${mode}\n- ${language}\n- ${grounding}\n- ${evidence}\n- ${presentation}\n- ${formatRule}`;
         }
-        return `ZORUNLU CIKTI KURALLARI:\n- ${mode}\n- ${language}\n- ${grounding}`;
+        return `ZORUNLU CIKTI KURALLARI:\n- ${mode}\n- ${language}\n- ${grounding}\n- ${evidence}\n- ${presentation}\n- ${formatRule}`;
       },
 
       applyAnalysisModeToPrompt(prompt, supportsMcp = false) {
@@ -747,6 +1280,15 @@
       },
 
       onAiProviderChange() {
+        const lock = this.activeRequestScopeLock();
+        if (lock) {
+          const lockedProvider = this.normalizeAiProvider(lock.provider || this.aiProvider);
+          const lockedModel = typeof lock.model === 'string' ? lock.model : (this.aiModel || '');
+          if (this.aiProvider !== lockedProvider) this.aiProvider = lockedProvider;
+          if (String(this.aiModel || '') !== String(lockedModel || '')) this.aiModel = lockedModel;
+          this.showScopeLockToast('provider');
+          return;
+        }
         this.aiProvider = this.normalizeAiProvider(this.aiProvider);
         this.persistAiProvider();
         this.loadAiModelPreference(this.aiProvider);
@@ -758,12 +1300,30 @@
       },
 
       onAiModelChange() {
+        const lock = this.activeRequestScopeLock();
+        if (lock) {
+          const lockedModel = typeof lock.model === 'string' ? lock.model : (this.aiModel || '');
+          if (String(this.aiModel || '') !== String(lockedModel || '')) {
+            this.aiModel = lockedModel;
+          }
+          this.showScopeLockToast('model');
+          return;
+        }
         this.persistAiModel();
         this.applyChatStateFromCache(this.currentChatScopeKey());
         this.runChatTaskQueue();
       },
 
       onAiAnalysisModeChange() {
+        const lock = this.activeRequestScopeLock();
+        if (lock) {
+          const lockedMode = this.normalizeAiAnalysisMode(lock.analysisMode || this.aiAnalysisMode);
+          if (this.aiAnalysisMode !== lockedMode) {
+            this.aiAnalysisMode = lockedMode;
+          }
+          this.showScopeLockToast('mode');
+          return;
+        }
         this.persistAiAnalysisMode();
         this.applyChatStateFromCache(this.currentChatScopeKey());
         this.runChatTaskQueue();
@@ -925,6 +1485,7 @@
         const itemKey = this.selectedItem?.key || '__global__';
         const scopeKey = this.currentChatScopeKey();
         this.clearChatScopesForItem(itemKey);
+        this.clearRequestScopeLock();
         this.chatMessages = [];
         this.chatError = '';
         this.noteEditorContent = '';
@@ -1001,6 +1562,7 @@
           itemApiBase,
           compareKeys,
           contextKeys,
+          chatTopic: this.normalizeChatTopic(this.chatTopic),
         };
       },
 
@@ -1084,6 +1646,19 @@
         return (this.chatTaskQueue || []).filter((task) => String(task?.scopeKey || '') !== scopeKey).length;
       },
 
+      chatQueueTotalPaperCount() {
+        const keys = new Set();
+        (this.chatTaskQueue || []).forEach((task) => {
+          const itemKey = String(task?.itemKey || '').trim();
+          if (itemKey) {
+            keys.add(itemKey);
+          }
+        });
+        const fromQueue = keys.size;
+        if (fromQueue > 0) return fromQueue;
+        return this.selectedItem?.key ? 1 : 0;
+      },
+
       hasFinishedChatTasksInCurrentScope() {
         return (this.chatTaskQueue || []).some((task) => {
           const status = String(task?.status || '').toLowerCase();
@@ -1093,22 +1668,22 @@
 
       queueHeaderLabel() {
         let count = 0;
-        let others = 0;
+        let totalPapers = 0;
         try {
           count = Number(this.currentScopeChatTaskCount?.() || 0);
-          others = Number(this.otherScopeChatTaskCount?.() || 0);
+          totalPapers = Number(this.chatQueueTotalPaperCount?.() || 0);
         } catch (e) {
           count = 0;
-          others = 0;
+          totalPapers = 0;
         }
         if (this.aiLanguage === 'en') {
-          if (others > 0) {
-            return `Task Queue (${count}, ${others} other papers)`;
+          if (totalPapers > 1) {
+            return `Task Queue (${count}, ${totalPapers} total papers)`;
           }
           return `Task Queue (${count})`;
         }
-        if (others > 0) {
-          return `İş Kuyruğu (${count}, ${others} diğer makale)`;
+        if (totalPapers > 1) {
+          return `İş Kuyruğu (${count}, ${totalPapers} toplam makale)`;
         }
         return `İş Kuyruğu (${count})`;
       },
@@ -1119,10 +1694,13 @@
         const taskScope = String(task.scopeKey || '');
         if (!taskScope || taskScope === scopeKey) return '';
         const sourceTitle = String(task.itemTitle || '').trim();
+        const topicLabel = this.chatTopicLabel(task.topic || 'general');
         if (this.aiLanguage === 'en') {
-          return sourceTitle ? `Paper: ${sourceTitle}` : 'Paper: Other scope';
+          if (sourceTitle) return `Paper: ${sourceTitle} • ${topicLabel}`;
+          return `Paper: Other scope • ${topicLabel}`;
         }
-        return sourceTitle ? `Makale: ${sourceTitle}` : 'Makale: Diğer kapsam';
+        if (sourceTitle) return `Makale: ${sourceTitle} • ${topicLabel}`;
+        return `Makale: Diğer kapsam • ${topicLabel}`;
       },
 
       async focusTaskScope(task) {
@@ -1142,6 +1720,9 @@
           return;
         }
         await this.selectItem(item);
+        if (task.topic && typeof this.setChatTopic === 'function') {
+          this.setChatTopic(task.topic, { persistCurrent: true, skipQueue: true });
+        }
         this.detailTab = 'chat';
       },
 
@@ -1215,6 +1796,7 @@
           this.selectedItem?.data?.title ||
           (this.aiLanguage === 'en' ? 'General' : 'Genel')
         ).trim();
+        const topic = this.normalizeChatTopic(payload.topic || this.chatTopic);
         const task = {
           id: this.nextChatTaskId(),
           label: String(payload.label || message).slice(0, 160),
@@ -1223,6 +1805,7 @@
           scopeKey,
           itemKey,
           itemTitle,
+          topic,
           options: { ...(payload.options || {}) },
           status: 'queued',
           createdAt: this.nowMs(),
@@ -1240,7 +1823,11 @@
       nextQueuedChatTask() {
         const queue = Array.isArray(this.chatTaskQueue) ? this.chatTaskQueue : [];
         const scopeKey = this.currentChatScopeKey();
-        return queue.find((row) => row?.status === 'queued' && String(row?.scopeKey || '') === scopeKey) || null;
+        const currentScopeTask = queue.find(
+          (row) => row?.status === 'queued' && String(row?.scopeKey || '') === scopeKey
+        );
+        if (currentScopeTask) return currentScopeTask;
+        return queue.find((row) => row?.status === 'queued' && row?.options?.forceItemScope === true) || null;
       },
 
       currentChatTask() {
@@ -1257,6 +1844,17 @@
         if (!next) return;
 
         this.activeChatTaskId = next.id;
+        if (next?.options?.forceItemScope === true) {
+          const targetKey = String(next.itemKey || '').trim();
+          if (targetKey && this.selectedItem?.key !== targetKey) {
+            const targetItem = typeof this.findItemByKey === 'function'
+              ? this.findItemByKey(targetKey)
+              : this.items.find((row) => row?.key === targetKey);
+            if (targetItem) {
+              await this.selectItem(targetItem);
+            }
+          }
+        }
         this.updateChatTask(next.id, {
           status: 'running',
           startedAt: this.nowMs(),
@@ -1270,7 +1868,10 @@
         });
         this.persistChatForCurrentItem();
 
-        const result = await this._sendToApi(next.prompt, next.options || {});
+        const result = await this._sendToApi(next.prompt, {
+          ...(next.options || {}),
+          scopeKey: String(next.scopeKey || ''),
+        });
         const state = String(result?.state || 'done');
         const error = String(result?.error || '').trim();
         this.updateChatTask(next.id, {
@@ -1394,6 +1995,12 @@
             return;
           }
           this.aiContextKeys = [...this.aiContextKeys, key];
+          const selectedItem = typeof this.findItemByKey === 'function'
+            ? this.findItemByKey(key)
+            : this.items.find((row) => row.key === key);
+          if (selectedItem) {
+            void this.prefetchItemContext(selectedItem);
+          }
           this.persistChatForCurrentItem();
           return;
         }
@@ -1562,7 +2169,7 @@
               notes: `For "${title}" (key: ${key}) in my Zotero library, gather notes and annotations (zotero_get_notes, zotero_get_annotations). Produce a structured study note in English with: (1) theme-grouped notes, (2) key quotes, (3) a 5-item action/reading list. If tools are unavailable, continue with the Zotero context below.\n\nZotero context:\n${context}`,
               related: `Find works related to "${title}" (key: ${key}) in my Zotero library (zotero_semantic_search). Validate metadata for relevant ones (zotero_get_item_metadata) and compare at most 5 works. Output in English with: (1) similarities, (2) differences, (3) which work answers which question better, (4) recommended reading order. If tools are unavailable, infer likely related directions from the Zotero context below.\n\nZotero context:\n${context}`,
               critique: `For "${title}" (key: ${key}) in my Zotero library, fetch full text when available (zotero_get_item_fulltext) and provide a critical review in English with: (1) clarity of research question, (2) methodological fit, (3) validity threats, (4) original contribution, (5) improvement suggestions. If tools are unavailable, continue with the Zotero context below and label assumptions.\n\nZotero context:\n${context}`,
-              sources: `For "${title}" (key: ${key}) in my Zotero library, use available metadata/full text/notes and automatically augment with external scholarly evidence when needed. Use ONLY academic sources and verify each cited paper before listing it. Include DOI or canonical URL for every source. Produce a direct answer in English with: (1) key evidence-backed takeaways, (2) top relevant papers (title/year + DOI or URL) with one-line relevance, (3) concrete next reading priorities. Do not output search-query suggestions unless explicitly requested. Do not invent facts; mark uncertainty clearly.\n\nZotero context:\n${context}`,
+              sources: `For "${title}" (key: ${key}) in my Zotero library, use available metadata/full text/notes and automatically augment with external scholarly evidence when needed. Use ONLY academic sources and verify each cited paper before listing it. Include DOI or canonical URL for every source. Produce a direct answer in English with: (1) key evidence-backed takeaways, (2) top relevant papers (first author surname + title/year + DOI or URL) with one-line relevance, (3) concrete next reading priorities. Do not output search-query suggestions unless explicitly requested. Do not invent facts; mark uncertainty clearly.\n\nZotero context:\n${context}`,
             };
             return finalizePrompt(prompts[type]);
           }
@@ -1572,7 +2179,7 @@
             notes: `Create a structured study note for "${title}" (key: ${key}) in English using ONLY the Zotero context below. Output format: (1) theme-grouped notes, (2) key quotes/phrases, (3) 5-item action or reading list. Clearly mark uncertain parts.\n\nZotero context:\n${context}`,
             related: `Based ONLY on the Zotero context below for "${title}" (key: ${key}), propose related works directions in English. Output format: (1) likely related themes, (2) suggested keywords/search queries, (3) what kind of papers to look for, (4) suggested reading order.\n\nZotero context:\n${context}`,
             critique: `Provide a critical review of "${title}" (key: ${key}) in English using ONLY the Zotero context below. Output format: (1) research question clarity, (2) methodological fit, (3) validity risks, (4) original contribution, (5) improvement suggestions. Label assumptions clearly.\n\nZotero context:\n${context}`,
-            sources: `Using the Zotero context below for "${title}" (key: ${key}), provide a direct English answer and enrich it with external scholarly evidence when needed. Use ONLY academic sources and verify each cited paper before listing it. Include DOI or canonical URL for every source. Include: (1) evidence-backed findings, (2) top relevant papers (title/year + DOI or URL) with one-line relevance, (3) practical next reading order. Do not output search-query suggestions unless explicitly requested. Mark missing parts clearly.\n\nZotero context:\n${context}`,
+            sources: `Using the Zotero context below for "${title}" (key: ${key}), provide a direct English answer and enrich it with external scholarly evidence when needed. Use ONLY academic sources and verify each cited paper before listing it. Include DOI or canonical URL for every source. Include: (1) evidence-backed findings, (2) top relevant papers (first author surname + title/year + DOI or URL) with one-line relevance, (3) practical next reading order. Do not output search-query suggestions unless explicitly requested. Mark missing parts clearly.\n\nZotero context:\n${context}`,
           };
           return finalizePrompt(prompts[type]);
         }
@@ -1583,7 +2190,7 @@
             notes: `Zotero kütüphanemdeki "${title}" (key: ${key}) için notları ve annotation'ları topla (zotero_get_notes, zotero_get_annotations). Düzenli çalışma notu hazırla. Çıktı formatı: (1) temalara göre gruplanmış notlar, (2) öne çıkan alıntılar, (3) 5 maddelik eylem/okuma listesi. Araçlar yoksa aşağıdaki bağlamla devam et.\n\nZotero bağlamı:\n${context}`,
             related: `Zotero kütüphanemde "${title}" (key: ${key}) ile ilişkili çalışmaları bul (zotero_semantic_search). Uygun olanların metadata'sını doğrula (zotero_get_item_metadata) ve en fazla 5 çalışma ile karşılaştırmalı analiz yap. Çıktı formatı: (1) benzerlikler, (2) ayrışmalar, (3) hangi çalışma hangi soruya daha iyi cevap veriyor, (4) önerilen okuma sırası. Araçlar yoksa aşağıdaki bağlama göre olası ilişkili yönleri çıkar.\n\nZotero bağlamı:\n${context}`,
             critique: `Zotero kütüphanemdeki "${title}" (key: ${key}) için mümkünse tam metni getir (zotero_get_item_fulltext) ve eleştirel değerlendirme yap. Çıktı formatı: (1) araştırma sorusu netliği, (2) yöntem uygunluğu, (3) geçerlilik tehditleri, (4) özgün katkı, (5) geliştirme önerileri. Araçlar yoksa aşağıdaki bağlamla devam et ve varsayımları işaretle.\n\nZotero bağlamı:\n${context}`,
-            sources: `Zotero kütüphanemdeki "${title}" (key: ${key}) için mevcut metadata/tam metin/notları kullan, gerekirse dış akademik kaynakları otomatik tarayarak doğrudan yanıt üret. Yalnız akademik kaynak kullan; sunmadan önce her kaynağı doğrula ve DOI veya kanonik URL ekle. Çıktıda şunları ver: (1) kanıta dayalı temel çıkarımlar, (2) en ilgili çalışmalar (başlık/yıl + DOI veya URL) ve kısa uygunluk gerekçesi, (3) pratik okuma önceliği. Kullanıcı açıkça istemedikçe arama sorgusu önerisi yazma. Bağlam dışı bilgi uydurma; belirsizlikleri açıkça belirt.\n\nZotero bağlamı:\n${context}`,
+            sources: `Zotero kütüphanemdeki "${title}" (key: ${key}) için mevcut metadata/tam metin/notları kullan, gerekirse dış akademik kaynakları otomatik tarayarak doğrudan yanıt üret. Yalnız akademik kaynak kullan; sunmadan önce her kaynağı doğrula ve DOI veya kanonik URL ekle. Çıktıda şunları ver: (1) kanıta dayalı temel çıkarımlar, (2) en ilgili çalışmalar (ilk yazar soyadı + başlık/yıl + DOI veya URL) ve kısa uygunluk gerekçesi, (3) pratik okuma önceliği. Kullanıcı açıkça istemedikçe arama sorgusu önerisi yazma. Bağlam dışı bilgi uydurma; belirsizlikleri açıkça belirt.\n\nZotero bağlamı:\n${context}`,
           };
           return finalizePrompt(prompts[type]);
         }
@@ -1593,12 +2200,27 @@
           notes: `Zotero kütüphanemdeki "${title}" (key: ${key}) için SADECE aşağıdaki Zotero bağlamını kullanarak düzenli çalışma notu hazırla. Çıktı formatı: (1) temalara göre notlar, (2) öne çıkan ifadeler/alıntılar, (3) 5 maddelik eylem/okuma listesi. Belirsiz noktaları işaretle.\n\nZotero bağlamı:\n${context}`,
           related: `SADECE aşağıdaki Zotero bağlamına göre "${title}" (key: ${key}) ile ilişkili olabilecek çalışma yönlerini Türkçe öner. Çıktı formatı: (1) olası ilişkili temalar, (2) aranacak anahtar kelimeler/sorgular, (3) hangi tür kaynaklara bakılmalı, (4) önerilen okuma sırası.\n\nZotero bağlamı:\n${context}`,
           critique: `Zotero kütüphanemdeki "${title}" (key: ${key}) için SADECE aşağıdaki Zotero bağlamını kullanarak eleştirel değerlendirme yap. Çıktı formatı: (1) araştırma sorusu netliği, (2) yöntem uygunluğu, (3) geçerlilik riskleri, (4) özgün katkı, (5) geliştirme önerileri. Varsayımları açıkça belirt.\n\nZotero bağlamı:\n${context}`,
-          sources: `Aşağıdaki Zotero bağlamına göre "${title}" (key: ${key}) için doğrudan Türkçe yanıt ver; ihtiyaç varsa dış akademik kaynaklardan bulguyu kendin getirerek güçlendir. Yalnız akademik kaynak kullan; sunmadan önce her kaynağı doğrula ve DOI veya kanonik URL ekle. Çıktıda şunları ver: (1) kanıta dayalı bulgular, (2) en ilgili çalışmalar (başlık/yıl + DOI veya URL) ve kısa uygunluk notu, (3) önerilen okuma sırası. Kullanıcı açıkça istemedikçe arama sorgusu önerisi yazma. Eksikleri açıkça belirt.\n\nZotero bağlamı:\n${context}`,
+          sources: `Aşağıdaki Zotero bağlamına göre "${title}" (key: ${key}) için doğrudan Türkçe yanıt ver; ihtiyaç varsa dış akademik kaynaklardan bulguyu kendin getirerek güçlendir. Yalnız akademik kaynak kullan; sunmadan önce her kaynağı doğrula ve DOI veya kanonik URL ekle. Çıktıda şunları ver: (1) kanıta dayalı bulgular, (2) en ilgili çalışmalar (ilk yazar soyadı + başlık/yıl + DOI veya URL) ve kısa uygunluk notu, (3) önerilen okuma sırası. Kullanıcı açıkça istemedikçe arama sorgusu önerisi yazma. Eksikleri açıkça belirt.\n\nZotero bağlamı:\n${context}`,
         };
         return finalizePrompt(prompts[type]);
       },
 
       async selectItem(item) {
+        const runningTask = typeof this.currentChatTask === 'function' ? this.currentChatTask() : null;
+        const lockedItemKey = String(
+          runningTask?.options?.forceItemScope === true
+            ? (runningTask?.itemKey || '')
+            : ''
+        ).trim();
+        if (lockedItemKey && item?.key && item.key !== lockedItemKey) {
+          this.showToast(
+            this.aiLanguage === 'en'
+              ? 'Comparison is running. Stay on the primary item until it finishes.'
+              : 'Karşılaştırma çalışıyor. Tamamlanana kadar ana makalede kalın.'
+          );
+          return;
+        }
+
         if (this.selectedItem?.key && this.selectedItem.key !== item.key) {
           this.persistChatForCurrentItem();
         }
@@ -1614,6 +2236,13 @@
 
         this.applyChatStateFromCache(this.chatScopeKey(item.key, this.aiProvider, this.aiModel, this.aiAnalysisMode));
         this.sanitizeAiContextKeys();
+        void this.prefetchItemContext(item);
+        this.aiContextSelectedItems()
+          .filter((ctxItem) => ctxItem?.key && ctxItem.key !== item.key)
+          .slice(0, this.aiContextSelectionLimit())
+          .forEach((ctxItem) => {
+            void this.prefetchItemContext(ctxItem);
+          });
         if (typeof this.syncMetadataEditorFromSelectedItem === 'function') {
           this.syncMetadataEditorFromSelectedItem();
         }
@@ -1658,24 +2287,35 @@
         }
       },
 
-      persistChatForCurrentItem() {
-        const cacheKey = this.currentChatScopeKey();
+      persistChatForScope(scopeKey = '', options = {}) {
+        const cacheKey = String(scopeKey || this.currentChatScopeKey());
+        const contextKeys = Array.isArray(options?.contextKeys)
+          ? options.contextKeys.slice(0, this.aiContextSelectionLimit())
+          : [...(this.aiContextKeys || [])];
         const now = this.nowMs();
         this.chatCache[cacheKey] = {
           messages: [...this.chatMessages],
           error: this.chatError || '',
           editor: this.noteEditorContent || '',
-          contextKeys: [...(this.aiContextKeys || [])],
+          contextKeys,
           savedAt: now,
           lastAccessedAt: now,
         };
         this.persistChatCacheToStorage();
       },
 
+      persistChatForCurrentItem() {
+        this.persistChatForScope(this.currentChatScopeKey(), {
+          contextKeys: [...(this.aiContextKeys || [])],
+        });
+      },
+
       buildSingleContextForItem(item, mode = this.aiAnalysisMode, options = {}) {
         const data = item?.data || {};
         const cfg = this.analysisModeContextConfig(mode);
         const includeLoadedNotes = !!options.includeLoadedNotes;
+        const includeFulltext = !!options.includeFulltext;
+        const prefetched = this.contextPrefetchEntry(item?.key) || {};
         const labels =
           this.aiLanguage === 'en'
             ? {
@@ -1684,7 +2324,9 @@
                 date: 'Date',
                 publication: 'Publication',
                 abstract: 'Abstract',
+                fulltext: 'Full-text excerpt',
                 notes: 'Notes',
+                annotations: 'Annotations',
               }
             : {
                 title: 'Başlık',
@@ -1692,7 +2334,9 @@
                 date: 'Tarih',
                 publication: 'Yayın',
                 abstract: 'Özet',
+                fulltext: 'Tam metin kırpıntısı',
                 notes: 'Notlar',
+                annotations: 'Annotationlar',
               };
 
         let context = `${labels.title}: ${data.title || ''}\n`;
@@ -1700,8 +2344,14 @@
         if (data.date) context += `${labels.date}: ${data.date}\n`;
         if (data.publicationTitle) context += `${labels.publication}: ${data.publicationTitle}\n`;
         if (data.DOI) context += `DOI: ${data.DOI}\n`;
-        if (data.abstractNote) {
-          context += `${labels.abstract}: ${this.compactContextText(data.abstractNote, cfg.abstractMax, cfg.abstractSentences)}\n`;
+        const abstractText = this.stripContextHtml(data.abstractNote || prefetched.abstractText || '');
+        if (abstractText) {
+          context += `${labels.abstract}: ${this.compactContextText(abstractText, cfg.abstractMax, cfg.abstractSentences)}\n`;
+        }
+
+        const fulltextSample = String(prefetched.fulltextSample || '').trim();
+        if (fulltextSample && (includeFulltext || !abstractText)) {
+          context += `${labels.fulltext}: ${this.compactContextText(fulltextSample, cfg.fulltextMax, cfg.fulltextSentences)}\n`;
         }
 
         if (includeLoadedNotes && this.itemNotes.length) {
@@ -1717,6 +2367,14 @@
               context += `${plain}\n`;
             }
           });
+        } else if (prefetched.notesSample) {
+          context += `\n${labels.notes}:\n`;
+          context += `${this.compactContextText(prefetched.notesSample, cfg.noteMax, cfg.noteSentences)}\n`;
+        }
+
+        if (prefetched.annotationsSample) {
+          context += `\n${labels.annotations}:\n`;
+          context += `${this.compactContextText(prefetched.annotationsSample, cfg.annotationMax, cfg.annotationSentences)}\n`;
         }
         return context;
       },
@@ -1751,6 +2409,7 @@
           context += `\n[${rowLabel}] ${title} (key: ${item.key})\n`;
           context += this.buildSingleContextForItem(item, mode, {
             includeLoadedNotes: isPrimary,
+            includeFulltext: true,
           });
         });
         return context.trim();
@@ -1765,6 +2424,32 @@
         this.noteEditorContent = lastAssistant.content;
         this.persistChatForCurrentItem();
         this.showToast(this.aiLanguage === 'en' ? 'Last AI response inserted' : 'Son AI yanıtı editöre alındı');
+      },
+
+      assistantMessageTextByIndex(index) {
+        const idx = Number(index);
+        if (!Number.isInteger(idx) || idx < 0 || idx >= this.chatMessages.length) return '';
+        const row = this.chatMessages[idx];
+        if (!row || row.role !== 'assistant') return '';
+        return String(row.content || '').trim();
+      },
+
+      async syncAssistantToZoteroByIndex(index) {
+        const content = this.assistantMessageTextByIndex(index);
+        if (!content) {
+          this.showToast(this.aiLanguage === 'en' ? 'No response to sync' : 'Senkronize edilecek yanıt yok');
+          return;
+        }
+        await this.saveNoteContentToZotero(content, { source: 'assistant-message' });
+      },
+
+      async syncAssistantToObsidianByIndex(index) {
+        const content = this.assistantMessageTextByIndex(index);
+        if (!content) {
+          this.showToast(this.aiLanguage === 'en' ? 'No response to sync' : 'Senkronize edilecek yanıt yok');
+          return;
+        }
+        await this.syncNoteContentToObsidian(content, { source: 'assistant-message' });
       },
 
       appendAssistantResponseToEditor(text) {
@@ -1879,8 +2564,8 @@
           if (looksLikeHtml) {
             throw new Error(
               this.aiLanguage === 'en'
-                ? `Server returned HTML for ${apiName}. Restart dashboard server with python3 serve.py`
-                : `${apiName} için sunucu HTML döndürdü. Dashboard sunucusunu python3 serve.py ile yeniden başlatın`
+                ? `Server returned HTML for ${apiName}. Restart dashboard server with npm start (or node server.mjs)`
+                : `${apiName} için sunucu HTML döndürdü. Dashboard sunucusunu npm start (veya node server.mjs) ile yeniden başlatın`
             );
           }
           throw new Error(
@@ -1986,13 +2671,12 @@
         await this.configureObsidianFolder(true);
       },
 
-      async syncEditorToObsidian() {
-        if (!this.selectedItem?.key || this.savingNoteToObsidian) return;
-
-        const content = this.normalizeNoteForObsidian(this.noteEditorContent);
+      async syncNoteContentToObsidian(rawContent, options = {}) {
+        if (!this.selectedItem?.key || this.savingNoteToObsidian) return false;
+        const content = this.normalizeNoteForObsidian(rawContent);
         if (!content) {
           this.showToast(this.aiLanguage === 'en' ? 'No note content to sync' : 'Senkronize edilecek not metni yok');
-          return;
+          return false;
         }
 
         const configured = await this.configureObsidianFolder(false);
@@ -2002,7 +2686,7 @@
               ? 'Set Obsidian folder before syncing'
               : 'Senkronizasyondan önce Obsidian klasörünü ayarlayın'
           );
-          return;
+          return false;
         }
 
         this.savingNoteToObsidian = true;
@@ -2031,22 +2715,31 @@
               ? `Synced to Obsidian: ${data.file || 'note'}`
               : `Obsidian senkronizasyonu tamamlandı: ${data.file || 'not'}`
           );
+          if (options?.updateEditor) {
+            this.noteEditorContent = String(rawContent || '').trim();
+            this.persistChatForCurrentItem();
+          }
+          return true;
         } catch (e) {
           this.chatError =
             (this.aiLanguage === 'en' ? 'Obsidian sync error: ' : 'Obsidian senkronizasyon hatası: ') + e.message;
           this.showToast(this.aiLanguage === 'en' ? 'Obsidian sync failed' : 'Obsidian senkronizasyonu başarısız');
+          return false;
         } finally {
           this.savingNoteToObsidian = false;
         }
       },
 
-      async saveEditorToZotero() {
-        if (!this.selectedItem?.key || this.savingNoteToZotero) return;
+      async syncEditorToObsidian() {
+        await this.syncNoteContentToObsidian(this.noteEditorContent, { updateEditor: false });
+      },
 
-        const noteBody = this.normalizeNoteHtml(this.noteEditorContent);
+      async saveNoteContentToZotero(rawContent, options = {}) {
+        if (!this.selectedItem?.key || this.savingNoteToZotero) return false;
+        const noteBody = this.normalizeNoteHtml(rawContent);
         if (!noteBody) {
           this.showToast(this.aiLanguage === 'en' ? 'No note content to save' : 'Kaydedilecek not metni yok');
-          return;
+          return false;
         }
 
         this.savingNoteToZotero = true;
@@ -2100,20 +2793,32 @@
 
           this.persistChatForCurrentItem();
           this.showToast(this.aiLanguage === 'en' ? 'Note synced to Zotero' : 'Not Zotero\'ya senkronize edildi');
+          if (options?.updateEditor) {
+            this.noteEditorContent = String(rawContent || '').trim();
+            this.persistChatForCurrentItem();
+          }
+          return true;
         } catch (e) {
           this.chatError =
             (this.aiLanguage === 'en' ? 'Zotero note sync error: ' : 'Zotero not senkronizasyon hatası: ') + e.message;
           this.showToast(this.aiLanguage === 'en' ? 'Note could not be saved' : 'Not kaydedilemedi');
+          return false;
         } finally {
           this.savingNoteToZotero = false;
         }
+      },
+
+      async saveEditorToZotero() {
+        await this.saveNoteContentToZotero(this.noteEditorContent, { updateEditor: false });
       },
 
       async sendClaude(type) {
         if (!this.selectedItem) return;
         if (!this.ensureAiReadyForRequest()) return;
 
+        this.setChatTopic(this.quickPromptTopic(type), { persistCurrent: true, skipQueue: true });
         this.clearCompareChatMode();
+        await this.ensureContextEvidenceReady(this.aiContextSelectedItems());
         const key = this.selectedItem.key;
         const title = this.selectedItem.data.title;
         const labels = this.quickPromptLabels();
@@ -2124,6 +2829,7 @@
           message: `${labels[type]}: ${title}`,
           label: labels[type] || type,
           scopeKey: this.currentChatScopeKey(),
+          topic: this.chatTopic,
           itemKey: key,
           itemTitle: title || (this.aiLanguage === 'en' ? 'Untitled' : 'Başlıksız'),
           options: {
@@ -2218,6 +2924,9 @@
         }
 
         this.chatInput = '';
+        if (this.selectedItem && !pipelineEnabled) {
+          await this.ensureContextEvidenceReady(this.aiContextSelectedItems());
+        }
         const supportsMcp = this.providerSupportsMcp();
 
         let prompt = message;
@@ -2257,6 +2966,7 @@
           message,
           label: message.slice(0, 80),
           scopeKey: this.currentChatScopeKey(),
+          topic: this.chatTopic,
           itemKey: this.selectedItem?.key || '',
           itemTitle: this.selectedItem?.data?.title || (this.aiLanguage === 'en' ? 'General' : 'Genel'),
           options: {
@@ -2489,6 +3199,7 @@
         this.chatError = '';
         let resultState = 'done';
         let resultError = '';
+        let requestLockToken = '';
 
         this.$nextTick(() => {
           this.$refs.chatScroll?.scrollTo({
@@ -2507,6 +3218,7 @@
         const requestContextKeys = Array.isArray(snapshot?.contextKeys)
           ? snapshot.contextKeys.slice(0, this.aiContextSelectionLimit() + 1)
           : this.aiContextSelectedItems().map((item) => item.key).slice(0, this.aiContextSelectionLimit() + 1);
+        const requestChatTopic = this.normalizeChatTopic(snapshot?.chatTopic || this.chatTopic);
         const requestItemApiBase = String(
           snapshot?.itemApiBase ||
           (this.selectedItem ? this.zoteroItemApiBase(this.selectedItem) : this.zoteroItemApiBase(null))
@@ -2517,6 +3229,7 @@
         const requestLanguage = ['tr', 'en'].includes(String(options.language || '').toLowerCase())
           ? String(options.language || '').toLowerCase()
           : (this.aiLanguage || 'tr');
+        const requestScopeKey = String(options.scopeKey || this.currentChatScopeKey());
         const sourceRoutingEnabled =
           options.forceSourceRouting === true
             ? true
@@ -2543,6 +3256,18 @@
           forceSourceRouting: options.forceSourceRouting === true,
           userMessage: String(options.userMessage || '').trim(),
           selectedItemTitle: String(this.selectedItem?.data?.title || '').trim(),
+          chatTopic: requestChatTopic,
+        };
+        requestLockToken = this.setRequestScopeLock({
+          itemKey: requestItemKey || this.selectedItem?.key || '',
+          provider: requestProvider,
+          model: requestModel,
+          analysisMode: requestAnalysisMode,
+          topic: requestChatTopic,
+          scopeKey: requestScopeKey,
+        });
+        const persistTargetScope = () => {
+          this.persistChatForScope(requestScopeKey, { contextKeys: requestContextKeys });
         };
 
         try {
@@ -2554,7 +3279,7 @@
             }
             await this._sendToApiJsonFallback(requestBody);
           }
-          this.persistChatForCurrentItem();
+          persistTargetScope();
         } catch (e) {
           if (e?.name === 'AbortError') {
             resultState = 'cancelled';
@@ -2563,13 +3288,14 @@
             resultState = 'error';
             resultError = e?.message || (this.aiLanguage === 'en' ? 'Unknown error' : 'Bilinmeyen hata');
             this.chatError = resultError;
-            this.persistChatForCurrentItem();
+            persistTargetScope();
           }
         }
 
         this.chatLoading = false;
         this.chatAbortController = null;
-        this.persistChatForCurrentItem();
+        this.clearRequestScopeLock(requestLockToken);
+        persistTargetScope();
         this.$nextTick(() => {
           this.$refs.chatScroll?.scrollTo({
             top: this.$refs.chatScroll.scrollHeight,

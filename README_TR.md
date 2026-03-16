@@ -8,7 +8,7 @@ Kısa özet:
 - AI analiz (Claude/Codex/Gemini CLI) yapar.
 - AI çıktısını düzenleyip Zotero notu olarak kaydeder.
 - AI notlarını Obsidian klasörüne senkronize eder.
-- Zotero erişimi için `zotero-mcp` kullanır.
+- Paketli uygulamada yerleşik Zotero köprüsü kullanır.
 
 ## 1. Bu uygulama ne yapar?
 
@@ -24,9 +24,8 @@ Orhon'un Zotero Paneli ile:
 ## 2. Gerekli araçlar
 
 ## Zorunlu
-- Python 3 (öneri: 3.10+)
+- Node.js 18+ (öneri: 20+)
 - Zotero Desktop (açık olmalı)
-- `zotero-mcp` (Zotero araç erişimi için)
 - AI CLI araçlarından en az biri:
   - Claude CLI
   - Codex CLI
@@ -48,24 +47,30 @@ Not:
 cd /path/to/zotero-dashboard
 ```
 
-3. Araçları doğrulayın:
+3. Bağımlılıkları yükleyin:
 
 ```bash
-python3 --version
-zotero-mcp --help
+npm install
+```
+
+4. Araçları doğrulayın:
+
+```bash
+node --version
+npm --version
 claude --version    # varsa
 codex --version     # varsa
 gemini --version    # varsa
 ```
 
-4. Zotero Desktop uygulamasını açın.
-5. Sunucuyu başlatın:
+5. Zotero Desktop uygulamasını açın.
+6. Sunucuyu başlatın:
 
 ```bash
-python3 serve.py
+npm start
 ```
 
-6. Tarayıcıda açın:
+7. Tarayıcıda açın:
 - [http://localhost:8080](http://localhost:8080)
 
 ## 4. Kurulum (Windows)
@@ -77,27 +82,58 @@ python3 serve.py
 cd C:\path\to\zotero-dashboard
 ```
 
-3. Araçları doğrulayın:
+3. Bağımlılıkları yükleyin:
 
 ```powershell
-py -3 --version
-zotero-mcp --help
+npm install
+```
+
+4. Araçları doğrulayın:
+
+```powershell
+node --version
+npm --version
 claude --version    # varsa
 codex --version     # varsa
 gemini --version    # varsa
 ```
 
-4. Zotero Desktop uygulamasını açın.
-5. Sunucuyu başlatın:
+5. Zotero Desktop uygulamasını açın.
+6. Sunucuyu başlatın:
 
 ```powershell
-py -3 serve.py
+npm start
 ```
 
-6. Tarayıcıda açın:
+7. Tarayıcıda açın:
 - [http://localhost:8080](http://localhost:8080)
 
-## 5. İlk kullanım (çok temel)
+## 5. Electron Masaüstü (macOS/Windows)
+
+Tek kod tabanı ile masaüstü uygulama üretebilirsiniz.
+
+- Geliştirme modunda Electron başlatma:
+
+```bash
+npm run app
+```
+
+- macOS paket alma (`.dmg` + `.zip`):
+
+```bash
+npm run dist:mac
+```
+
+- Windows paket alma (`.exe` NSIS + portable):
+
+```powershell
+npm run dist:win
+```
+
+Not: Windows paketi en sorunsuz şekilde Windows makinede üretilir.
+Çıktılar `dist/` klasörüne yazılır.
+
+## 6. İlk kullanım (çok temel)
 
 1. Sol panelden bir koleksiyon veya öğe seçin.
 2. Sağ panelde:
@@ -109,14 +145,14 @@ py -3 serve.py
    - `Zotero'ya Senkronize Et`
    - `Obsidian'a Senkronize Et`
 
-## 6. Obsidian senkronu
+## 7. Obsidian senkronu
 
 - İlk senkron sırasında klasör istenir.
 - Daha sonra klasör ikonundan değiştirilebilir.
 - Dosya adı formatı:
   - `makale-adı-yıl.md`
 
-## 7. Önemli ayarlar (opsiyonel)
+## 8. Önemli ayarlar (opsiyonel)
 
 Komutlar otomatik bulunmazsa ortam değişkeni tanımlayabilirsiniz:
 
@@ -126,11 +162,11 @@ Komutlar otomatik bulunmazsa ortam değişkeni tanımlayabilirsiniz:
 - `CODEX_COMMAND`
 - `GEMINI_COMMAND`
 
-## 8. Sık karşılaşılan sorunlar
+## 9. Sık karşılaşılan sorunlar
 
 ## "Zotero'ya Bağlanılamadı"
 - Zotero Desktop açık mı kontrol edin.
-- Uygulamayı `python3 serve.py` / `py -3 serve.py` ile tekrar başlatın.
+- Uygulamayı `npm start` (veya `node server.mjs`) ile tekrar başlatın.
 
 ## "CLI bulunamadı"
 - İlgili CLI kurulumu/PATH ayarı eksik olabilir.
@@ -140,8 +176,7 @@ Komutlar otomatik bulunmazsa ortam değişkeni tanımlayabilirsiniz:
 - Yanlış server/endpoint dönüyor olabilir.
 - Dashboard sunucusunu yeniden başlatın.
 
-## 9. Uygulama adı
+## 10. Uygulama adı
 
 - Türkçe: **Orhon'un Zotero Paneli**
 - English: **Orhon's Zotero Dashboard**
-

@@ -8,6 +8,10 @@
       <div class="text-[11px] font-semibold text-slate-200" x-text="aiLanguage === 'en' ? 'Startup Self-Check' : 'Açılış Self-Check'"></div>
       <div class="flex items-center gap-1">
         <button
+          @click="cliConfigOpen = !cliConfigOpen; if (cliConfigOpen && typeof loadCliConfig === 'function') loadCliConfig();"
+          class="text-[10px] px-2 py-1 rounded-md border border-slate-600 bg-slate-800 hover:bg-slate-700 transition"
+          x-text="aiLanguage === 'en' ? 'CLI Paths' : 'CLI Yolları'"></button>
+        <button
           @click="runStartupSelfCheck(true)"
           :disabled="selfCheckLoading"
           class="text-[10px] px-2 py-1 rounded-md border border-slate-600 bg-slate-800 hover:bg-slate-700 transition disabled:opacity-40"
@@ -34,5 +38,27 @@
       </template>
     </div>
     <div x-show="selfCheckError" class="mt-2 text-[10px] text-red-300 bg-red-500/10 border border-red-500/30 rounded-md px-2 py-1.5" x-text="selfCheckError"></div>
+    <div x-show="cliConfigOpen" x-cloak class="mt-2 rounded-md border border-slate-700/60 bg-slate-900/50 px-2.5 py-2">
+      <div class="flex items-center justify-between gap-2 mb-2">
+        <div class="text-[11px] font-semibold text-slate-200" x-text="aiLanguage === 'en' ? 'CLI Path Overrides' : 'CLI Yol Ayarları'"></div>
+        <button
+          @click="saveCliConfig()"
+          :disabled="cliConfigSaving || cliConfigLoading"
+          class="text-[10px] px-2 py-1 rounded-md border border-slate-600 bg-slate-800 hover:bg-slate-700 transition disabled:opacity-40"
+          x-text="cliConfigSaving ? (aiLanguage === 'en' ? 'Saving...' : 'Kaydediliyor...') : (aiLanguage === 'en' ? 'Save' : 'Kaydet')"></button>
+      </div>
+      <div class="space-y-2">
+        <template x-for="provider in ['claude', 'codex', 'gemini']" :key="`cli-path-${provider}`">
+          <label class="block">
+            <div class="text-[10px] text-slate-300 mb-1" x-text="cliProviderLabel(provider)"></div>
+            <input
+              x-model="cliCommandOverrides[provider]"
+              :placeholder="aiLanguage === 'en' ? 'Leave blank for automatic detection' : 'Otomatik algılama için boş bırakın'"
+              class="w-full h-8 bg-slate-800 border border-slate-600 rounded-md px-2 text-[11px] text-slate-200 placeholder-slate-500 focus:outline-none focus:border-red-500">
+          </label>
+        </template>
+      </div>
+      <div class="mt-2 text-[10px] text-slate-400" x-text="aiLanguage === 'en' ? 'Use this only if the packaged app cannot find a CLI automatically.' : 'Bunu yalnızca paketli uygulama CLI aracını otomatik bulamazsa kullanın.'"></div>
+    </div>
   </div>
 </div>

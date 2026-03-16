@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="tr" class="dark">
+<html lang="tr">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -23,17 +23,17 @@
 <script>
   (function applySavedThemeEarly() {
     try {
-      var savedTheme = localStorage.getItem('zotero-theme') || 'dark';
-      if (savedTheme === 'light') {
-        document.documentElement.classList.add('theme-light');
-        document.documentElement.classList.remove('dark');
-      } else {
+      var savedTheme = localStorage.getItem('zotero-theme') || 'light';
+      if (savedTheme === 'dark') {
         document.documentElement.classList.remove('theme-light');
         document.documentElement.classList.add('dark');
+      } else {
+        document.documentElement.classList.add('theme-light');
+        document.documentElement.classList.remove('dark');
       }
     } catch (e) {
-      document.documentElement.classList.remove('theme-light');
-      document.documentElement.classList.add('dark');
+      document.documentElement.classList.add('theme-light');
+      document.documentElement.classList.remove('dark');
     }
   })();
 </script>

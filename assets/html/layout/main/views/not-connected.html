@@ -5,11 +5,13 @@
         <h2 class="text-lg font-semibold mb-2" x-text="aiLanguage === 'en' ? 'Could Not Connect to Zotero' : 'Zotero\'ya Bağlanılamadı'"></h2>
         <p class="text-slate-400 text-sm mb-4" x-show="aiLanguage === 'en'" x-cloak>
           Zotero Desktop must be open. Start with
-          <code class="text-xs bg-slate-700 px-1.5 py-0.5 rounded">python3 serve.py</code>.
+          <code class="text-xs bg-slate-700 px-1.5 py-0.5 rounded">npm start</code>
+          (or <code class="text-xs bg-slate-700 px-1.5 py-0.5 rounded">node server.mjs</code>).
         </p>
         <p class="text-slate-400 text-sm mb-4" x-show="aiLanguage !== 'en'" x-cloak>
           Zotero Desktop açık olmalı.
-          <code class="text-xs bg-slate-700 px-1.5 py-0.5 rounded">python3 serve.py</code>
+          <code class="text-xs bg-slate-700 px-1.5 py-0.5 rounded">npm start</code>
+          (veya <code class="text-xs bg-slate-700 px-1.5 py-0.5 rounded">node server.mjs</code>)
           ile başlatın.
         </p>
         <div x-show="connectionError" class="text-left text-[11px] text-red-300 bg-red-500/10 border border-red-500/30 rounded-md px-2.5 py-2 mb-4">

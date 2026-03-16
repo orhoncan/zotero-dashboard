@@ -1,0 +1,71 @@
+{
+  "name": "orhons-zotero-dashboard",
+  "version": "0.0.4",
+  "private": true,
+  "description": "Orhon's Zotero Dashboard - Zotero library management and AI analysis panel",
+  "author": "Orhon Can Dagtekin",
+  "type": "module",
+  "main": "electron/main.mjs",
+  "scripts": {
+    "start": "node server.mjs",
+    "app": "electron .",
+    "dist:mac": "electron-builder --mac",
+    "dist:win": "electron-builder --win nsis portable"
+  },
+  "devDependencies": {
+    "electron": "^37.2.0",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "tr.orhon.zotero.dashboard",
+    "productName": "Orhon's Zotero Dashboard",
+    "icon": "assets/icons/icon.png",
+    "asar": true,
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "index.html",
+      "assets/**/*",
+      "mcp/**/*",
+      "server.mjs",
+      "electron/**/*",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "mcp/**/*"
+    ],
+    "mac": {
+      "icon": "assets/icons/icon.png",
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "category": "public.app-category.productivity"
+    },
+    "win": {
+      "icon": "assets/icons/icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "installerIcon": "assets/icons/icon.ico",
+      "uninstallerIcon": "assets/icons/icon.ico",
+      "installerHeaderIcon": "assets/icons/icon.ico",
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}

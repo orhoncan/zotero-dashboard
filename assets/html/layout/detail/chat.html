@@ -32,6 +32,19 @@
 		                  </template>
 		                </select>
 		              </div>
+		              <div class="mt-1 min-w-0">
+		                <span class="text-[10px] text-slate-500 shrink-0" x-text="aiLanguage === 'en' ? 'Thread' : 'Konu'"></span>
+		                <div class="chat-topic-tabs mt-1">
+		                  <template x-for="opt in chatTopicOptions()" :key="'chat-topic-' + opt.value">
+		                    <button
+		                      type="button"
+		                      @click="setChatTopic(opt.value)"
+		                      class="chat-topic-tab text-[10px] px-2 py-1 rounded-md border transition"
+		                      :class="chatTopic === opt.value ? 'chat-topic-tab-active' : ''"
+		                      x-text="opt.label"></button>
+		                  </template>
+		                </div>
+		              </div>
 			              <div class="mt-1 text-[10px] flex items-center justify-between gap-2">
 			                <span
 			                  class="truncate"
@@ -244,15 +257,38 @@
                       <p class="text-[10px] text-slate-500 mb-1" x-text="aiLanguage === 'en' ? 'Sources' : 'Kaynaklar'"></p>
                       <div class="chat-source-cards">
                         <template x-for="(card, cIdx) in chatSourceCards(msg, i)" :key="`src-${i}-${cIdx}-${card.url || card.doi || card.title}`">
-                          <a
-                            :href="card.url || (card.doi ? ('https://doi.org/' + card.doi) : '#')"
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            class="chat-source-card block rounded-md border border-slate-700/60 bg-slate-800/50 px-2 py-1.5 hover:bg-slate-700/50 transition">
-                            <span class="block text-[11px] font-medium text-slate-200 truncate" :title="card.title" x-text="card.title"></span>
-                            <span class="block text-[10px] text-slate-500 truncate" :title="chatSourceCardMeta(card)" x-text="chatSourceCardMeta(card)"></span>
-                          </a>
+                          <div>
+                            <a
+                              x-show="card.url || card.doi"
+                              :href="card.url || (card.doi ? ('https://doi.org/' + card.doi) : '#')"
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              class="chat-source-card block rounded-md border border-slate-700/60 bg-slate-800/50 px-2 py-1.5 hover:bg-slate-700/50 transition">
+                              <span class="block text-[11px] font-medium text-slate-200 truncate" :title="card.title" x-text="card.title"></span>
+                              <span class="block text-[10px] text-slate-500 truncate" :title="chatSourceCardMeta(card)" x-text="chatSourceCardMeta(card)"></span>
+                            </a>
+                            <div
+                              x-show="!(card.url || card.doi)"
+                              class="chat-source-card block rounded-md border border-slate-700/60 bg-slate-800/40 px-2 py-1.5">
+                              <span class="block text-[11px] font-medium text-slate-200 truncate" :title="card.title" x-text="card.title"></span>
+                              <span class="block text-[10px] text-slate-500 truncate" :title="chatSourceCardMeta(card)" x-text="chatSourceCardMeta(card)"></span>
+                            </div>
+                          </div>
                         </template>
+                      </div>
+                    </div>
+                    <div class="mt-2 pt-2 border-t border-slate-700/50">
+                      <div class="flex flex-wrap items-center gap-1.5">
+                        <button
+                          @click="syncAssistantToZoteroByIndex(i)"
+                          :disabled="savingNoteToZotero || !selectedItem?.key"
+                          class="text-[10px] px-2 py-1 rounded-md border border-red-700 accent-bg hover:bg-red-700 text-white disabled:opacity-40 transition"
+                          x-text="savingNoteToZotero ? (aiLanguage === 'en' ? 'Syncing...' : 'Senkronize ediliyor...') : (aiLanguage === 'en' ? 'Save to Zotero' : 'Zotero’ya kaydet')"></button>
+                        <button
+                          @click="syncAssistantToObsidianByIndex(i)"
+                          :disabled="savingNoteToObsidian || !selectedItem?.key"
+                          class="text-[10px] px-2 py-1 rounded-md border border-violet-500/35 bg-violet-500/10 hover:bg-violet-500/20 disabled:opacity-40 transition"
+                          x-text="savingNoteToObsidian ? (aiLanguage === 'en' ? 'Syncing...' : 'Senkronize ediliyor...') : (aiLanguage === 'en' ? 'Save to Obsidian' : 'Obsidian’a kaydet')"></button>
                       </div>
                     </div>
                   </div>

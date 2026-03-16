@@ -8,15 +8,19 @@
 cd /Users/orhon/zotero-dashboard
 ```
 
-
-
-3. Sunucuyu başlat:
+3. Bağımlılıkları yükle:
 
 ```bash
-python3 serve.py
+npm install
 ```
 
-4. Tarayıcıda aç:
+4. Sunucuyu başlat:
+
+```bash
+npm start
+```
+
+5. Tarayıcıda aç:
 
 ```text
 http://localhost:8080
@@ -29,7 +33,7 @@ Terminali kapatsan da çalışsın istiyorsan:
 
 ```bash
 cd /Users/orhon/zotero-dashboard
-nohup python3 serve.py > /tmp/zotero-dashboard.log 2>&1 & echo $!
+nohup npm start > /tmp/zotero-dashboard.log 2>&1 & echo $!
 ```
 
 ## 3) Durdurma
@@ -51,7 +55,7 @@ kill <PID>
 PID=$(lsof -tiTCP:8080 -sTCP:LISTEN)
 [ -n "$PID" ] && kill "$PID"
 cd /Users/orhon/zotero-dashboard
-nohup python3 serve.py > /tmp/zotero-dashboard.log 2>&1 & echo $!
+nohup npm start > /tmp/zotero-dashboard.log 2>&1 & echo $!
 ```
 
 ## 5) Log İzleme
@@ -65,10 +69,31 @@ Bu genelde API endpoint'i yerine HTML döndüğü anlamına gelir (çoğunlukla 
 
 Çözüm:
 1. 8080'deki süreci durdur.
-2. `python3 serve.py` ile tekrar başlat.
+2. `npm start` ile tekrar başlat.
 3. Tarayıcıda hard refresh yap.
 
 ## 7) Obsidian Klasörü
 - İlk `Sync to Obsidian` işleminde klasör yolu istenir.
 - Sonradan not editörü altındaki klasör ikonundan değiştirilebilir.
 
+## 8) Electron (Masaüstü Uygulama)
+
+Geliştirme modunda masaüstü uygulama:
+
+```bash
+npm run app
+```
+
+macOS paket:
+
+```bash
+npm run dist:mac
+```
+
+Windows paket:
+
+```powershell
+npm run dist:win
+```
+
+Not: Windows build işlemini Windows üzerinde yapmak daha kararlıdır.

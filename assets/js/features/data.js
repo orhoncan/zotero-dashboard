@@ -177,14 +177,14 @@
         const labels = this.aiLanguage === 'en'
           ? {
               zoteroDesktop: 'Zotero Desktop',
-              zoteroMcp: 'zotero-mcp',
+              zoteroMcp: 'Zotero Bridge',
               claudeCli: 'Claude CLI',
               codexCli: 'Codex CLI',
               geminiCli: 'Gemini CLI',
             }
           : {
               zoteroDesktop: 'Zotero Desktop',
-              zoteroMcp: 'zotero-mcp',
+              zoteroMcp: 'Zotero Köprüsü',
               claudeCli: 'Claude CLI',
               codexCli: 'Codex CLI',
               geminiCli: 'Gemini CLI',
@@ -194,6 +194,79 @@
 
       orderedSelfCheckRows() {
         return ['zoteroDesktop', 'zoteroMcp', 'claudeCli', 'codexCli', 'geminiCli'];
+      },
+
+      cliProviderLabel(provider) {
+        if (provider === 'claude') return 'Claude';
+        if (provider === 'codex') return 'Codex';
+        if (provider === 'gemini') return 'Gemini';
+        return provider;
+      },
+
+      normalizeCliOverrides(raw = {}) {
+        const source = raw && typeof raw === 'object' ? raw : {};
+        return {
+          claude: String(source.claude || '').trim(),
+          codex: String(source.codex || '').trim(),
+          gemini: String(source.gemini || '').trim(),
+        };
+      },
+
+      async loadCliConfig() {
+        this.cliConfigLoading = true;
+        try {
+          const res = await fetch('/cli-config');
+          const raw = await res.text();
+          let data = {};
+          try {
+            data = raw ? JSON.parse(raw) : {};
+          } catch (e) {
+            throw new Error(this.aiLanguage === 'en' ? 'CLI config response is not valid JSON' : 'CLI yapılandırma yanıtı geçerli JSON değil');
+          }
+          if (!res.ok) {
+            throw new Error(data?.error || `/cli-config ${res.status}`);
+          }
+          this.cliCommandOverrides = this.normalizeCliOverrides(data?.overrides || {});
+        } catch (e) {
+          this.showToast(e?.message || (this.aiLanguage === 'en' ? 'CLI config could not be loaded' : 'CLI yapılandırması yüklenemedi'));
+        } finally {
+          this.cliConfigLoading = false;
+        }
+      },
+
+      async saveCliConfig() {
+        if (this.cliConfigSaving) return;
+        this.cliConfigSaving = true;
+        try {
+          const payload = this.normalizeCliOverrides(this.cliCommandOverrides || {});
+          const res = await fetch('/cli-config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+          const raw = await res.text();
+          let data = {};
+          try {
+            data = raw ? JSON.parse(raw) : {};
+          } catch (e) {
+            throw new Error(this.aiLanguage === 'en' ? 'CLI config response is not valid JSON' : 'CLI yapılandırma yanıtı geçerli JSON değil');
+          }
+          if (!res.ok) {
+            throw new Error(data?.error || `/cli-config ${res.status}`);
+          }
+          this.cliCommandOverrides = this.normalizeCliOverrides(data?.overrides || {});
+          this.showToast(this.aiLanguage === 'en' ? 'CLI paths saved' : 'CLI yolları kaydedildi');
+          if (typeof this.runStartupSelfCheck === 'function') {
+            await this.runStartupSelfCheck(true);
+          }
+          if (typeof this.refreshProviderHealth === 'function') {
+            await this.refreshProviderHealth();
+          }
+        } catch (e) {
+          this.showToast(e?.message || (this.aiLanguage === 'en' ? 'CLI config could not be saved' : 'CLI yapılandırması kaydedilemedi'));
+        } finally {
+          this.cliConfigSaving = false;
+        }
       },
 
       selfCheckRowOk(key) {
@@ -240,8 +313,8 @@
             ready: false,
             code: 'MCP_DOWN',
             message: this.aiLanguage === 'en'
-              ? 'zotero-mcp is not ready.'
-              : 'zotero-mcp hazır değil.',
+              ? 'Zotero bridge is not ready.'
+              : 'Zotero köprüsü hazır değil.',
           };
         }
 
@@ -378,6 +451,9 @@
           if (typeof this.loadAiAnalysisModePreference === 'function') {
             this.loadAiAnalysisModePreference();
           }
+          if (typeof this.loadChatTopicPreference === 'function') {
+            this.loadChatTopicPreference();
+          }
           if (typeof this.loadPipelineTemplatePreference === 'function') {
             this.loadPipelineTemplatePreference();
           }
@@ -399,6 +475,9 @@
           if (typeof this.runStartupSelfCheck === 'function') {
             await this.runStartupSelfCheck(false);
           }
+          if (typeof this.loadCliConfig === 'function') {
+            await this.loadCliConfig();
+          }
           if (typeof this.startSelfCheckPolling === 'function') {
             this.startSelfCheckPolling();
           }
@@ -413,7 +492,7 @@
             this.applyUiLanguage();
           }
 
-          this.theme = localStorage.getItem('zotero-theme') || 'dark';
+          this.theme = localStorage.getItem('zotero-theme') || 'light';
           this.applyTheme();
 
           if (typeof this.loadPersistedChatCache === 'function') {

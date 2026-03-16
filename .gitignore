@@ -1,20 +1,24 @@
-# macOS
+# OS / editor
 .DS_Store
+Thumbs.db
 
-# Python cache
+# Node
+node_modules/
+npm-debug.log*
+yarn-error.log*
+
+# Python cache (legacy server compatibility)
 __pycache__/
-*.py[cod]
+*.pyc
 
-# Local tool/config artifacts
-.gemini/
-.mcp-zotero.json
+# Local runtime/config
 .obsidian-config.json
+.mcp-zotero.json
+.gemini/
 
-# Release artifacts
+# Build/release artifacts
 *.zip
-orhons-zotero-dashboard/
-
-# Optional env files
-.env
-.env.*
-!.env.example
+*.log
+/tmp/
+dist/
+release/

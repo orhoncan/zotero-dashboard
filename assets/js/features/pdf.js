@@ -15,9 +15,120 @@
         return `zotero://open-pdf/library/items/${key}`;
       },
 
+      zoteroWebScopeForAttachment(attachment) {
+        const libraryType = attachment?.library?.type || 'user';
+        const libraryId = attachment?.library?.id;
+        if (libraryType === 'group' && libraryId) {
+          return `groups/${libraryId}`;
+        }
+        const userId = Number(libraryId || this.userId || 0);
+        if (!Number.isFinite(userId) || userId <= 0) return '';
+        return `users/${userId}`;
+      },
+
+      zoteroWebUrlsForAttachment(attachment) {
+        const key = attachment?.key || attachment?.data?.key;
+        if (!key) return [];
+        const scope = this.zoteroWebScopeForAttachment(attachment);
+        if (!scope) return [];
+        const parentKey = attachment?.data?.parentItem || '';
+        const urls = [
+          `https://www.zotero.org/${scope}/items/${key}/reader`,
+          `https://www.zotero.org/${scope}/items/${key}/library`,
+        ];
+        if (parentKey) {
+          urls.push(`https://www.zotero.org/${scope}/items/${parentKey}/library`);
+        }
+        const deduped = [];
+        urls.forEach((url) => {
+          if (url && !deduped.includes(url)) deduped.push(url);
+        });
+        return deduped;
+      },
+
+      pdfSyncStatusText() {
+        if (!this.pdfSyncInProgress) {
+          return this.aiLanguage === 'en' ? 'Idle' : 'Hazır';
+        }
+        if (this.pdfSyncSource === 'web') {
+          return this.aiLanguage === 'en' ? 'Auto sync: Zotero Web' : 'Oto senkron: Zotero Web';
+        }
+        return this.aiLanguage === 'en' ? 'Auto sync: Zotero Reader' : 'Oto senkron: Zotero Reader';
+      },
+
+      pdfSyncHistoryLimit() {
+        return 18;
+      },
+
+      formatPdfSyncTime(ts) {
+        const value = Number(ts || 0);
+        if (!value) return '';
+        try {
+          const locale = this.aiLanguage === 'en' ? 'en-US' : 'tr-TR';
+          return new Date(value).toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        } catch (e) {
+          return '';
+        }
+      },
+
+      appendPdfSyncHistory(entry = {}) {
+        const at = Number(entry.at || Date.now());
+        const source = String(entry.source || this.pdfSyncSource || 'manual').trim().toLowerCase();
+        const annotations = Math.max(0, Number(entry.annotations || 0));
+        const notes = Math.max(0, Number(entry.notes || 0));
+        const delta = Number(entry.delta || 0);
+        const row = {
+          at,
+          source,
+          itemKey: String(entry.itemKey || this.activePdfItemKey || '').trim(),
+          annotations,
+          notes,
+          delta,
+        };
+        const current = Array.isArray(this.pdfSyncHistory) ? this.pdfSyncHistory : [];
+        this.pdfSyncHistory = [row, ...current].slice(0, this.pdfSyncHistoryLimit());
+      },
+
+      pdfSyncLastSummary() {
+        const history = Array.isArray(this.pdfSyncHistory) ? this.pdfSyncHistory : [];
+        const activeKey = String(this.activePdfItemKey || '').trim();
+        const last = activeKey
+          ? (history.find((row) => String(row?.itemKey || '') === activeKey) || history[0] || null)
+          : (history[0] || null);
+        if (!last) {
+          return this.aiLanguage === 'en' ? 'Last sync: -' : 'Son senkron: -';
+        }
+        const timeLabel = this.formatPdfSyncTime(last.at);
+        if (this.aiLanguage === 'en') {
+          return `Last sync: ${timeLabel || '-'}`;
+        }
+        return `Son senkron: ${timeLabel || '-'}`;
+      },
+
+      currentPdfNoteCount(itemKey = this.activePdfItemKey) {
+        const key = String(itemKey || '').trim();
+        if (!key) return 0;
+        if (key === String(this.selectedItem?.key || '')) {
+          return Math.max(0, Number((this.itemNotes || []).length || 0));
+        }
+        return 0;
+      },
+
+      pdfSyncHistoryRows(limit = 4) {
+        const maxRows = Math.max(1, Number(limit || 4));
+        const rows = Array.isArray(this.pdfSyncHistory) ? this.pdfSyncHistory : [];
+        const activeKey = String(this.activePdfItemKey || '').trim();
+        const scoped = activeKey
+          ? rows.filter((row) => String(row?.itemKey || '') === activeKey)
+          : rows;
+        return scoped.slice(0, maxRows);
+      },
+
       setActivePdfAttachmentMeta(attachment) {
         this.activePdfAttachmentKey = attachment?.key || attachment?.data?.key || null;
         this.activePdfZoteroUrl = this.zoteroPdfUrlForAttachment(attachment);
+        const webUrls = this.zoteroWebUrlsForAttachment(attachment);
+        this.activePdfZoteroWebUrl = webUrls[0] || '';
       },
 
       stripHtmlPlain(value) {
@@ -100,6 +211,7 @@
 
       async launchZoteroUrl(zoteroUrl, options = {}) {
         const shouldScheduleRefresh = !!options.scheduleRefresh;
+        const syncSource = String(options.source || '').trim().toLowerCase();
         const copyFallback = async () => {
           try {
             await navigator.clipboard.writeText(zoteroUrl);
@@ -141,7 +253,7 @@
           }, 1400);
 
           if (shouldScheduleRefresh) {
-            this.schedulePdfAnnotationRefresh();
+            this.schedulePdfAnnotationRefresh(syncSource);
           }
           return true;
         } catch (e) {
@@ -164,6 +276,8 @@
           clearTimeout(this._pdfAnnotationRefreshTimer);
           this._pdfAnnotationRefreshTimer = null;
         }
+        this.pdfSyncInProgress = false;
+        this.pdfSyncSource = '';
       },
 
       teardownPdfIntersectionObserver() {
@@ -232,13 +346,16 @@
         this.activePdfItemKey = null;
         this.activePdfAttachmentKey = null;
         this.activePdfZoteroUrl = '';
+        this.activePdfZoteroWebUrl = '';
       },
 
-      schedulePdfAnnotationRefresh() {
+      schedulePdfAnnotationRefresh(source = '') {
         const itemKey = this.activePdfItemKey;
         if (!itemKey) return;
 
         this.clearPdfAnnotationRefreshTimer();
+        this.pdfSyncInProgress = true;
+        this.pdfSyncSource = String(source || '').trim().toLowerCase();
         let tries = 0;
         const maxTries = 8;
         const tick = async () => {
@@ -247,9 +364,23 @@
             return;
           }
           tries += 1;
-          await this.loadPdfAnnotations(itemKey, { force: true });
+          const update = await this.loadPdfAnnotations(itemKey, { force: true });
+          if (update?.changed || tries === 1) {
+            this.appendPdfSyncHistory({
+              itemKey,
+              source: this.pdfSyncSource || source || 'reader',
+              annotations: update?.annotations ?? this.pdfAnnotations.length,
+              notes: this.currentPdfNoteCount(itemKey),
+              delta: (update?.annotations ?? this.pdfAnnotations.length) - (update?.previous ?? this.pdfAnnotations.length),
+            });
+          }
           if (tries >= maxTries) {
             this.clearPdfAnnotationRefreshTimer();
+            this.showToast(
+              this.aiLanguage === 'en'
+                ? `Auto sync completed (${this.pdfAnnotations.length})`
+                : `Oto senkron tamamlandı (${this.pdfAnnotations.length})`
+            );
             return;
           }
           this._pdfAnnotationRefreshTimer = setTimeout(tick, 3000);
@@ -261,7 +392,19 @@
           'focus',
           async () => {
             if (this.pdfUrl && this.activePdfItemKey === itemKey) {
-              await this.loadPdfAnnotations(itemKey, { force: true });
+              const update = await this.loadPdfAnnotations(itemKey, { force: true });
+              this.appendPdfSyncHistory({
+                itemKey,
+                source: this.pdfSyncSource || source || 'reader',
+                annotations: update?.annotations ?? this.pdfAnnotations.length,
+                notes: this.currentPdfNoteCount(itemKey),
+                delta: (update?.annotations ?? this.pdfAnnotations.length) - (update?.previous ?? this.pdfAnnotations.length),
+              });
+              this.showToast(
+                this.aiLanguage === 'en'
+                  ? `Annotations synced (${this.pdfAnnotations.length})`
+                  : `Anotasyonlar senkronlandı (${this.pdfAnnotations.length})`
+              );
             }
           },
           { once: true }
@@ -274,7 +417,38 @@
           return;
         }
         const zoteroUrl = this.activePdfZoteroUrl || `zotero://open-pdf/library/items/${this.activePdfAttachmentKey}`;
-        await this.launchZoteroUrl(zoteroUrl, { scheduleRefresh: true });
+        await this.launchZoteroUrl(zoteroUrl, { scheduleRefresh: true, source: 'reader' });
+      },
+
+      async openPdfInZoteroWeb() {
+        if (!this.activePdfAttachmentKey) {
+          this.showToast(this.aiLanguage === 'en' ? 'No active PDF attachment' : 'Etkin PDF eki bulunamadı');
+          return;
+        }
+        const targetUrl = String(this.activePdfZoteroWebUrl || '').trim();
+        if (!targetUrl) {
+          this.showToast(
+            this.aiLanguage === 'en'
+              ? 'Zotero Web URL could not be resolved'
+              : 'Zotero Web bağlantısı çözümlenemedi'
+          );
+          return;
+        }
+        try {
+          window.open(targetUrl, '_blank', 'noopener,noreferrer');
+          this.showToast(
+            this.aiLanguage === 'en'
+              ? 'Opened in Zotero Web (annotate there, auto-sync here)'
+              : 'Zotero Web’de açıldı (oradan anotasyon yap, burada oto senkron)'
+          );
+          this.schedulePdfAnnotationRefresh('web');
+        } catch (e) {
+          this.showToast(
+            this.aiLanguage === 'en'
+              ? 'Could not open Zotero Web'
+              : 'Zotero Web açılamadı'
+          );
+        }
       },
 
       async resolvePdfAttachmentForItem(item) {
@@ -312,6 +486,7 @@
         }
         await this.launchZoteroUrl(zoteroUrl, {
           scheduleRefresh: !!(this.activePdfItemKey && this.activePdfItemKey === item.key && this.pdfUrl),
+          source: 'reader',
         });
       },
 
@@ -428,6 +603,7 @@
         } else {
           this.activePdfAttachmentKey = null;
           this.activePdfZoteroUrl = '';
+          this.activePdfZoteroWebUrl = '';
         }
 
         this.destroyPdfViewer();
@@ -460,7 +636,14 @@
         }
 
         await this.loadPdfViewerDocument(item.key);
-        await this.loadPdfAnnotations(item.key);
+        const initial = await this.loadPdfAnnotations(item.key);
+        this.appendPdfSyncHistory({
+          itemKey: item.key,
+          source: 'manual',
+          annotations: initial?.annotations ?? this.pdfAnnotations.length,
+          notes: this.currentPdfNoteCount(item.key),
+          delta: 0,
+        });
       },
 
       async retryPdfJsViewer() {
@@ -1036,28 +1219,62 @@
 
       async loadPdfAnnotations(itemKey, options = {}) {
         const force = !!options.force;
+        const currentRows = Array.isArray(this.annotationCache?.[itemKey]) ? this.annotationCache[itemKey] : [];
+        const currentSignature = currentRows.map((row) => `${row?.key || ''}:${row?.text || ''}:${row?.comment || ''}`).join('|');
         if (!force && this.annotationCache[itemKey]) {
           const cached = this.annotationCache[itemKey];
           const rows = Array.isArray(cached) ? cached : (Array.isArray(cached?.items) ? cached.items : []);
           this.pdfAnnotations = [...rows];
           this.pdfAnnotationsUpdatedAt = this.getPdfAnnotationsTimestamp(itemKey) || Date.now();
           this.showPdfAnnotations = this.pdfAnnotations.length > 0 || this.pdfSearchResults.length > 0;
-          return;
+          return {
+            itemKey,
+            fromCache: true,
+            changed: false,
+            annotations: this.pdfAnnotations.length,
+            previous: rows.length,
+          };
         }
 
         try {
           const children = await this.fetchPdfApiRows(`${ns.API}/items/${itemKey}/children?format=json`);
           const annotations = this.normalizeAnnotationRows(children);
           this.setPdfAnnotationsState(itemKey, annotations);
+          const nextSignature = annotations.map((row) => `${row?.key || ''}:${row?.text || ''}:${row?.comment || ''}`).join('|');
+          return {
+            itemKey,
+            fromCache: false,
+            changed: nextSignature !== currentSignature,
+            annotations: annotations.length,
+            previous: currentRows.length,
+          };
         } catch (e) {
           this.pdfAnnotations = [];
           this.pdfAnnotationsUpdatedAt = 0;
+          return {
+            itemKey,
+            fromCache: false,
+            changed: currentRows.length > 0,
+            annotations: 0,
+            previous: currentRows.length,
+            error: String(e?.message || ''),
+          };
         }
       },
 
       async refreshPdfAnnotationsNow() {
         if (!this.activePdfItemKey) return;
-        await this.loadPdfAnnotations(this.activePdfItemKey, { force: true });
+        const itemKey = this.activePdfItemKey;
+        const update = await this.loadPdfAnnotations(itemKey, { force: true });
+        this.pdfSyncInProgress = false;
+        this.pdfSyncSource = '';
+        this.appendPdfSyncHistory({
+          itemKey,
+          source: 'manual',
+          annotations: update?.annotations ?? this.pdfAnnotations.length,
+          notes: this.currentPdfNoteCount(itemKey),
+          delta: (update?.annotations ?? this.pdfAnnotations.length) - (update?.previous ?? this.pdfAnnotations.length),
+        });
         this.showToast(
           this.aiLanguage === 'en'
             ? `Annotations refreshed (${this.pdfAnnotations.length})`

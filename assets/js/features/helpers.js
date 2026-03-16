@@ -30,9 +30,9 @@
         return [];
       },
 
-      stripInlineSourceSection(text) {
+      stripInlineSourceSection(text, options = {}) {
         const fn = this.formattingUtils().stripInlineSourceSection;
-        if (typeof fn === 'function') return fn(text);
+        if (typeof fn === 'function') return fn(text, options);
         return String(text || '');
       },
 
@@ -77,6 +77,68 @@
         return `${this.aiLanguage || 'tr'}:${index}:${this.simpleTextHash(text)}`;
       },
 
+      normalizeSourceKeyValue(value) {
+        return String(value || '').trim().toLowerCase();
+      },
+
+      contextualSourceCatalog() {
+        const catalog = {
+          doi: new Map(),
+          url: new Map(),
+          title: new Map(),
+        };
+        const rows = [];
+        const seen = new Set();
+        const push = (item) => {
+          if (!item?.key || seen.has(item.key)) return;
+          seen.add(item.key);
+          rows.push(item);
+        };
+
+        if (this.selectedItem) push(this.selectedItem);
+        if (typeof this.aiContextSelectedItems === 'function') {
+          (this.aiContextSelectedItems() || []).forEach(push);
+        }
+        (this.items || []).slice(0, 120).forEach(push);
+
+        rows.forEach((item) => {
+          const data = item?.data || {};
+          const title = String(data.title || '').trim();
+          const year = typeof this.extractYear === 'function' ? this.extractYear(data.date) : '';
+          const doi = this.normalizeSourceKeyValue(data.DOI || data.doi || '');
+          const url = this.normalizeSourceKeyValue(data.url || '');
+          const titleKey = this.normalizeSourceKeyValue(title).replace(/[^a-z0-9ğüşöçı]+/gi, '');
+          const payload = { title, year };
+          if (doi) catalog.doi.set(doi, payload);
+          if (url) catalog.url.set(url, payload);
+          if (titleKey) catalog.title.set(titleKey, payload);
+        });
+
+        return catalog;
+      },
+
+      normalizeChatSourceCards(cards = []) {
+        const list = Array.isArray(cards) ? cards : [];
+        if (!list.length) return [];
+        const catalog = this.contextualSourceCatalog();
+        return list.map((card) => {
+          const doiKey = this.normalizeSourceKeyValue(card?.doi || '');
+          const urlKey = this.normalizeSourceKeyValue(card?.url || '');
+          const titleKey = this.normalizeSourceKeyValue(card?.title || '').replace(/[^a-z0-9ğüşöçı]+/gi, '');
+          const match =
+            (doiKey ? catalog.doi.get(doiKey) : null) ||
+            (urlKey ? catalog.url.get(urlKey) : null) ||
+            (titleKey ? catalog.title.get(titleKey) : null) ||
+            null;
+          if (!match?.title) return card;
+          return {
+            ...card,
+            title: match.title,
+            year: match.year || card.year || '',
+          };
+        });
+      },
+
       renderAssistantMessageBundle(msg, index, options = {}) {
         const role = String(msg?.role || '').toLowerCase();
         const content = String(msg?.content || '');
@@ -88,14 +150,17 @@
         if (!options.force && cache[key]) return cache[key];
 
         const formatted = this.postFormatAssistantOutput(content);
-        const cards = (this.extractSourceCardsFromText(formatted) || []).map((row) => ({
+        const extractedCards = (this.extractSourceCardsFromText(formatted) || []).map((row) => ({
           title: String(row?.title || (this.aiLanguage === 'en' ? 'Source' : 'Kaynak')).trim(),
           url: String(row?.url || '').trim(),
           doi: String(row?.doi || '').trim(),
           host: String(row?.host || '').trim(),
           year: String(row?.year || '').trim(),
         }));
-        const textForHtml = cards.length ? this.stripInlineSourceSection(formatted) : formatted;
+        const cards = this.normalizeChatSourceCards(extractedCards);
+        const textForHtml = cards.length
+          ? this.stripInlineSourceSection(formatted, { aggressive: true, cards })
+          : formatted;
         const html = this.renderMd(textForHtml, { skipNormalize: true });
 
         const payload = { html, cards, formatted: textForHtml };
@@ -114,7 +179,9 @@
       chatSourceCardMeta(card) {
         const parts = [];
         if (card?.year) parts.push(card.year);
-        if (card?.host) parts.push(card.host);
+        const host = String(card?.host || '').trim();
+        const hasDoi = !!String(card?.doi || '').trim();
+        if (host && !(hasDoi && host.toUpperCase() === 'DOI')) parts.push(host);
         if (card?.doi) parts.push(`DOI: ${card.doi}`);
         return parts.join(' • ');
       },

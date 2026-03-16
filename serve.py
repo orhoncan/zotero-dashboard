@@ -986,7 +986,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return (
                 "Rewrite the text below strictly in natural English. "
                 "Preserve meaning exactly, keep factual content unchanged, do not add new information, "
-                "do not remove important details, and avoid Turkish words unless they are unavoidable proper nouns.\n\n"
+                "do not remove important details, and avoid Turkish words unless they are unavoidable proper nouns. "
+                "Keep an academic, concise, and comprehensive tone.\n\n"
                 "Do not include process narration such as 'I now have enough content' or 'I will now produce the output'.\n\n"
                 f"Text:\n{content}"
             )
@@ -994,10 +995,19 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             "Aşağıdaki metni sadece doğal Türkçe ile yeniden yaz. "
             "Anlamı birebir koru, olgusal içeriği değiştirme, yeni bilgi ekleme, önemli ayrıntıları silme, "
             "zorunlu özel adlar dışında yabancı kelime kullanma. "
+            "Akademik, öz ve kapsayıcı bir üslup kullan. "
             "Türkçe karakterleri doğru kullan (ç, ğ, ı, İ, ö, ş, ü). "
             "Yana not/süreç cümlesi yazma (ör. 'Yeterli içerik elde ettim', 'Çıktıyı şimdi üretiyorum').\n\n"
             f"Metin:\n{content}"
         )
+
+    def normalize_process_meta_candidate(self, text):
+        candidate = str(text or "").strip().lower()
+        if not candidate:
+            return ""
+        candidate = re.sub(r"^[\s\-*#>\u2022\"'`“”‘’\(\)\[\]\{\}:;,.!?]+", "", candidate)
+        candidate = re.sub(r"[\s\"'`“”‘’\(\)\[\]\{\}:;,.!?]+$", "", candidate)
+        return candidate.strip()
 
     def process_meta_prefixes(self):
         return [
@@ -1007,6 +1017,19 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             "çıktıyı şimdi hazırlıyorum",
             "şimdi çıktıyı üretiyorum",
             "şimdi çıktıyı hazırlıyorum",
+            "şu anda zotero kütüphanenizdeki veritabanı durumunu kontrol ediyor",
+            "şu anda zotero kütüphanesindeki veritabanı durumunu kontrol ediyor",
+            "zotero kütüphanenizdeki veritabanı durumunu kontrol ediyor",
+            "zotero kütüphanenizdeki çalışmayla ilişkili kaynakları belirliyorum",
+            "zotero kütüphanenizdeki kaynakları belirliyorum",
+            "zotero kütüphanenizde semantik arama yapıyorum",
+            "zotero kütüphanenizdeki",
+            "i am checking your zotero library",
+            "i am searching your zotero library",
+            "currently checking your zotero library",
+            "currently searching your zotero library",
+            "i am running semantic search",
+            "currently running semantic search",
             "i now have enough content",
             "i now have enough context",
             "i will now produce the output",
@@ -1016,7 +1039,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         ]
 
     def is_process_meta_line(self, text):
-        candidate = str(text or "").strip().lower()
+        candidate = self.normalize_process_meta_candidate(text)
         if not candidate:
             return False
 
@@ -1027,14 +1050,20 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             r"^yeterli .* (elde ettim|topladım)",
             r"^çıktıyı şimdi .*",
             r"^şimdi .*çıktı.*",
+            r"^(şu anda|şimdi)\b.*\b(kontrol ediyor(?:um)?|inceliyor(?:um)?|tarıyor(?:um)?|arıyor(?:um)?|belirliyor(?:um)?|tespit ediyor(?:um)?|doğruluyor(?:um)?|derliyor(?:um)?|topluyor(?:um)?|hazırlıyor(?:um)?)\b",
+            r"^zotero\b.*\b(veritabanı durumunu kontrol ediyor(?:um)?|semantik arama yapıyor(?:um)?|arama yapıyor(?:um)?|kaynakları belirliyor(?:um)?)\b",
+            r"^zotero\b.*\btespit etmek için\b.*\bsemantik arama yapıyor(?:um)?\b",
             r"^i (now )?(have|got) enough (content|context)",
             r"^i will now (produce|generate|prepare) (the )?output",
             r"^now (producing|generating|preparing) (the )?output",
+            r"^i(?:'m| am|’m)\b.*\b(checking|searching|scanning|identifying|retrieving|looking up|reviewing|analyzing|compiling)\b",
+            r"^currently\b.*\b(checking|searching|scanning|identifying|retrieving|looking up|reviewing|analyzing|compiling)\b",
+            r"^to\b.*\b(i(?:'m| am|’m)|currently)\b.*\b(searching|checking|scanning|identifying|retrieving)\b",
         ]
         return any(re.search(pattern, candidate) for pattern in patterns)
 
     def is_process_meta_prefix(self, text):
-        candidate = str(text or "").strip().lower()
+        candidate = self.normalize_process_meta_candidate(text)
         if not candidate:
             return False
         prefixes = self.process_meta_prefixes()
@@ -1614,7 +1643,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             str(url or ""),
             headers={
                 "Accept": "application/json",
-                "User-Agent": "Orhon-Zotero-Dashboard/0.0.3",
+                "User-Agent": "Orhon-Zotero-Dashboard/0.0.4",
                 **(headers or {}),
             },
             method="GET",
@@ -2245,6 +2274,43 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         base = self.strip_prompt_directive_block(prompt, headers)
         return base
 
+    def output_quality_instruction(self, target_language, require_verified_sources=False):
+        lang = self.normalize_output_language(target_language)
+        if lang == "en":
+            lines = [
+                "Write strictly in the selected language; do not mix languages.",
+                "Use concise but comprehensive academic style (neutral, technical, clear).",
+                "No process narration, no filler, no hidden chain-of-thought.",
+                "Do not invent claims, references, DOI, URL, datasets, or quotations.",
+                "If evidence is uncertain or missing, label it explicitly as inference/limitation.",
+            ]
+            if require_verified_sources:
+                lines.append(
+                    "When external sources are used, cite only verified records and provide a short source list: Title — Year — DOI/URL."
+                )
+            return "\n".join(f"- {line}" for line in lines)
+
+        lines = [
+            "Yalnızca seçili dilde yaz; dil karıştırma.",
+            "Öz fakat kapsayıcı, akademik üslup kullan (tarafsız, teknik, açık).",
+            "Süreç anlatımı, dolgu cümlesi ve iç düşünme metni yazma.",
+            "İddia, kaynak, DOI, URL, veri seti veya alıntı uydurma.",
+            "Kanıt eksikse bunu açıkça çıkarım/sınırlılık olarak etiketle.",
+        ]
+        if require_verified_sources:
+            lines.append(
+                "Dış kaynak kullanılıyorsa yalnız doğrulanmış kayıtları kullan; kısa kaynak listesi ver: Başlık — Yıl — DOI/URL."
+            )
+        return "\n".join(f"- {line}" for line in lines)
+
+    def apply_output_quality_rule(self, prompt, target_language, require_verified_sources=False):
+        headers = ["OUTPUT QUALITY:", "ÇIKTI KALİTESİ:"]
+        base = self.strip_prompt_directive_block(prompt, headers)
+        lang = self.normalize_output_language(target_language)
+        header = "OUTPUT QUALITY:" if lang == "en" else "ÇIKTI KALİTESİ:"
+        rules = self.output_quality_instruction(target_language, require_verified_sources=require_verified_sources)
+        return f"{base}\n\n{header}\n{rules}".strip()
+
     def source_routing_instruction(self, target_language):
         lang = self.normalize_output_language(target_language)
         if lang == "en":
@@ -2551,7 +2617,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 "Rules:\n"
                 "- Use ONLY the chunk text below.\n"
                 "- Do not use outside knowledge.\n"
-                "- If information is missing, state it clearly.\n\n"
+                "- If information is missing, state it clearly.\n"
+                "- Write only in English, with concise but comprehensive academic style.\n"
+                "- Do not include process narration.\n"
+                "- Do not invent references, DOI/URL, or claims not grounded in this chunk.\n\n"
                 "Output format:\n"
                 "1) Chunk focus (1 sentence)\n"
                 "2) Key points (4-6 bullets)\n"
@@ -2567,7 +2636,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             "Kurallar:\n"
             "- SADECE aşağıdaki parça metnini kullan.\n"
             "- Dış bilgi ekleme.\n"
-            "- Bilgi eksikse açıkça belirt.\n\n"
+            "- Bilgi eksikse açıkça belirt.\n"
+            "- Yalnızca Türkçe yaz; öz fakat kapsayıcı akademik üslup kullan.\n"
+            "- Süreç anlatımı yazma.\n"
+            "- Bu parçada geçmeyen iddia, kaynak, DOI/URL uydurma.\n\n"
             "Çıktı formatı:\n"
             "1) Parça odağı (1 cümle)\n"
             "2) Ana noktalar (4-6 madde)\n"
@@ -2586,7 +2658,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 f'User goal: {user_query}\n\n'
                 "Rules:\n"
                 "- Use ONLY the chunk summaries.\n"
-                "- Keep claims grounded; mark missing or uncertain points.\n\n"
+                "- Keep claims grounded; mark missing or uncertain points.\n"
+                "- Write only in English, in concise but comprehensive academic style.\n"
+                "- No process narration and no fabricated references/DOI/URL.\n\n"
                 f"{template_instruction}\n\n"
                 "Citation rule (MANDATORY): Every factual sentence or bullet MUST end with at least one source tag like [Chunk 3].\n"
                 "If multiple chunks support a claim, use multiple tags such as [Chunk 2][Chunk 5].\n\n"
@@ -2597,7 +2671,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             f'Kullanıcı hedefi: {user_query}\n\n'
             "Kurallar:\n"
             "- SADECE parça özetlerini kullan.\n"
-            "- İddiaları kaynağa dayandır; eksik/belirsiz noktaları işaretle.\n\n"
+            "- İddiaları kaynağa dayandır; eksik/belirsiz noktaları işaretle.\n"
+            "- Yalnızca Türkçe yaz; öz fakat kapsayıcı akademik üslup kullan.\n"
+            "- Süreç anlatımı ve uydurma kaynak/DOI/URL üretme.\n\n"
             f"{template_instruction}\n\n"
             "Kaynak etiketi kuralı (ZORUNLU): Her olgusal cümle veya madde sonuna en az bir kaynak etiketi ekle: [Parça 3].\n"
             "Aynı iddia birden fazla parçaya dayanıyorsa birden çok etiket kullan: [Parça 2][Parça 5].\n\n"
@@ -3814,6 +3890,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         "topics": [],
                         "error": str(e)[:200],
                     }
+            effective_prompt = self.apply_output_quality_rule(
+                effective_prompt,
+                output_language,
+                require_verified_sources=self.normalize_source_routing_mode(req_data),
+            )
 
             if not pipeline_requested:
                 run_result = self.execute_with_provider_fallback(
@@ -4132,6 +4213,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         "topics": [],
                         "error": str(e)[:200],
                     }
+            effective_prompt = self.apply_output_quality_rule(
+                effective_prompt,
+                output_language,
+                require_verified_sources=self.normalize_source_routing_mode(req_data),
+            )
 
             if not pipeline_requested:
                 run_result = self.execute_with_provider_fallback(

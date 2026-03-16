@@ -12,7 +12,11 @@
           </button>
           <svg class="w-4 h-4 text-red-400" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
           <span class="text-xs font-medium truncate" x-text="pdfTitle"></span>
-          <span class="hidden lg:inline text-[10px] text-slate-500" x-text="(aiLanguage === 'en' ? 'Annotations: ' : 'Notlar: ') + formatPdfAnnotationUpdatedAt(pdfAnnotationsUpdatedAt)"></span>
+          <span class="hidden lg:inline text-[10px] text-slate-500 truncate max-w-[24rem]" :title="pdfSyncLastSummary()" x-text="pdfSyncLastSummary()"></span>
+          <span
+            x-show="pdfSyncInProgress"
+            class="hidden md:inline-flex text-[10px] px-1.5 py-0.5 rounded-md border border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
+            x-text="pdfSyncStatusText()"></span>
         </div>
         <div class="flex items-center gap-1 shrink-0">
           <button
@@ -42,9 +46,9 @@
           <button
             @mousedown.stop
             @click.stop="refreshPdfAnnotationsNow()"
-            class="w-7 h-7 inline-flex items-center justify-center text-slate-300 hover:text-white transition border border-slate-600 rounded-md shrink-0"
+            class="w-8 h-8 inline-flex items-center justify-center text-slate-300 hover:text-white transition border border-slate-600 rounded-md shrink-0"
             :title="aiLanguage === 'en' ? 'Refresh annotations' : 'Anotasyonları yenile'">
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <svg class="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
               <path d="M20 11a8 8 0 1 0 2.3 5.7"/>
               <path d="M20 4v7h-7"/>
             </svg>
