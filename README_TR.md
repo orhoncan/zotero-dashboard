@@ -1,182 +1,80 @@
-# Orhon'un Zotero Paneli (Türkçe)
+# Orhon'un Zotero Paneli
 
-Bu proje, Zotero kütüphanenizi web arayüzünden yönetmenizi sağlayan bir paneldir.
+Orhon'un Zotero Paneli, Zotero kütüphanenizi tek ekranda taramanızı, PDF açmanızı, AI ile analiz yapmanızı ve notları Zotero veya Obsidian'a geri yazmanızı sağlayan masaüstü uygulamasıdır.
 
-Kısa özet:
-- Zotero öğelerini ve koleksiyonlarını listeler.
-- PDF görüntüler, not/annotation gösterir.
-- AI analiz (Claude/Codex/Gemini CLI) yapar.
-- AI çıktısını düzenleyip Zotero notu olarak kaydeder.
-- AI notlarını Obsidian klasörüne senkronize eder.
-- Paketli uygulamada yerleşik Zotero köprüsü kullanır.
+## Ne işe yarar?
 
-## 1. Bu uygulama ne yapar?
+- Koleksiyon ve makaleleri listeler, arama ve filtreleme yapar.
+- PDF, özet, etiket, not ve annotation bilgilerini gösterir.
+- Claude, Codex veya Gemini ile akademik analiz üretir.
+- AI çıktılarını not editöründe biriktirir ve Zotero/Obsidian'a kaydeder.
 
-Orhon'un Zotero Paneli ile:
-- Kütüphanedeki öğeleri arayabilir ve filtreleyebilirsiniz.
-- Bir makalenin detaylarını, etiketlerini, özetini görebilirsiniz.
-- PDF açıp Zotero Reader bağlantısı üzerinden annotation senkron akışı kullanabilirsiniz.
-- AI Analiz sekmesinde hızlı özet, kritik değerlendirme, not analizi gibi istekler gönderebilirsiniz.
-- AI çıktısını alttaki not editörüne biriktirip:
-  - Zotero'ya not olarak kaydedebilirsiniz.
-  - Obsidian'a `.md` dosyası olarak gönderebilirsiniz.
+## Gerekli olanlar
 
-## 2. Gerekli araçlar
-
-## Zorunlu
-- Node.js 18+ (öneri: 20+)
-- Zotero Desktop (açık olmalı)
-- AI CLI araçlarından en az biri:
-  - Claude CLI
-  - Codex CLI
-  - Gemini CLI
+- `Zotero Desktop` açık olmalı
+- En az bir AI aracı kurulu olmalı:
+  - `claude`
+  - `codex`
+  - `gemini`
 
 Not:
-- Üçü birden zorunlu değildir, en az bir AI CLI yeterlidir.
-- Arayüzde self-check paneli hangi araçların çalıştığını gösterir.
+- Uygulamanın içinde yerleşik `Zotero Bridge` bulunur.
+- Son kullanıcı için ayrıca `Node.js` veya `zotero-mcp` kurmanız gerekmez.
 
-## İsteğe bağlı
-- Obsidian (not senkronu kullanacaksanız)
+## Kurulum
 
-## 3. Kurulum (macOS)
+## macOS
 
-1. Proje klasörünü indirin/klonlayın.
-2. Terminali proje klasöründe açın:
+Release sayfasından şunlardan birini indirin:
 
-```bash
-cd /path/to/zotero-dashboard
-```
+- `.dmg`
+- `.zip`
 
-3. Bağımlılıkları yükleyin:
+Önerilen yol:
 
-```bash
-npm install
-```
+1. `.dmg` dosyasını açın.
+2. Uygulamayı `Applications` klasörüne sürükleyin.
+3. `Zotero Desktop` uygulamasını açın.
+4. `Orhon's Zotero Dashboard.app` dosyasını açın.
 
-4. Araçları doğrulayın:
+## Windows
 
-```bash
-node --version
-npm --version
-claude --version    # varsa
-codex --version     # varsa
-gemini --version    # varsa
-```
+Release sayfasından şunlardan birini indirin:
 
-5. Zotero Desktop uygulamasını açın.
-6. Sunucuyu başlatın:
+- `Setup.exe`
+- portable `.exe`
 
-```bash
-npm start
-```
+Önerilen yol:
 
-7. Tarayıcıda açın:
-- [http://localhost:8080](http://localhost:8080)
+1. `Setup.exe` dosyasını çalıştırın.
+2. Kurulum bittikten sonra uygulamayı açın.
+3. `Zotero Desktop` uygulamasını açın.
 
-## 4. Kurulum (Windows)
+Portable sürüm kullanıyorsanız doğrudan `.exe` dosyasını açabilirsiniz.
 
-1. Proje klasörünü indirin/klonlayın.
-2. PowerShell veya CMD'yi proje klasöründe açın:
+## İlk kullanım
 
-```powershell
-cd C:\path\to\zotero-dashboard
-```
+1. Zotero'yu açın.
+2. Dashboard'u açın.
+3. Sol panelden bir makale seçin.
+4. Sağdaki `AI Analiz` sekmesinden sağlayıcıyı seçin.
+5. Hızlı butonlardan birini kullanın veya soru yazın.
+6. Yanıt not editörüne eklenir.
+7. İsterseniz Zotero'ya veya Obsidian'a kaydedin.
 
-3. Bağımlılıkları yükleyin:
+## Sık sorunlar
 
-```powershell
-npm install
-```
+**Zotero'ya bağlanamıyor**
 
-4. Araçları doğrulayın:
+- Zotero Desktop'ın açık olduğundan emin olun.
+- Sağ üstteki kontrol panelini kontrol edin.
 
-```powershell
-node --version
-npm --version
-claude --version    # varsa
-codex --version     # varsa
-gemini --version    # varsa
-```
+**AI sağlayıcı görünmüyor**
 
-5. Zotero Desktop uygulamasını açın.
-6. Sunucuyu başlatın:
+- `claude --version`, `codex --version` veya `gemini --version` komutunu terminalde test edin.
+- Gerekirse uygulamadaki kontrol panelinden CLI yolunu tanımlayın.
 
-```powershell
-npm start
-```
+**PDF içeriği sınırlı görünüyor**
 
-7. Tarayıcıda açın:
-- [http://localhost:8080](http://localhost:8080)
-
-## 5. Electron Masaüstü (macOS/Windows)
-
-Tek kod tabanı ile masaüstü uygulama üretebilirsiniz.
-
-- Geliştirme modunda Electron başlatma:
-
-```bash
-npm run app
-```
-
-- macOS paket alma (`.dmg` + `.zip`):
-
-```bash
-npm run dist:mac
-```
-
-- Windows paket alma (`.exe` NSIS + portable):
-
-```powershell
-npm run dist:win
-```
-
-Not: Windows paketi en sorunsuz şekilde Windows makinede üretilir.
-Çıktılar `dist/` klasörüne yazılır.
-
-## 6. İlk kullanım (çok temel)
-
-1. Sol panelden bir koleksiyon veya öğe seçin.
-2. Sağ panelde:
-   - `Detay` sekmesinde metadata, özet, etiketler görünür.
-   - `AI Analiz` sekmesinde sağlayıcı/model seçilir.
-3. Hızlı butonlardan birine basın (`Özetle`, `Notları Analiz Et` vb.).
-4. Yanıt gelince not editöründe metin birikir.
-5. İsterseniz:
-   - `Zotero'ya Senkronize Et`
-   - `Obsidian'a Senkronize Et`
-
-## 7. Obsidian senkronu
-
-- İlk senkron sırasında klasör istenir.
-- Daha sonra klasör ikonundan değiştirilebilir.
-- Dosya adı formatı:
-  - `makale-adı-yıl.md`
-
-## 8. Önemli ayarlar (opsiyonel)
-
-Komutlar otomatik bulunmazsa ortam değişkeni tanımlayabilirsiniz:
-
-- `ZOTERO_MCP_COMMAND`
-- `ZOTERO_STORAGE_DIR`
-- `CLAUDE_COMMAND`
-- `CODEX_COMMAND`
-- `GEMINI_COMMAND`
-
-## 9. Sık karşılaşılan sorunlar
-
-## "Zotero'ya Bağlanılamadı"
-- Zotero Desktop açık mı kontrol edin.
-- Uygulamayı `npm start` (veya `node server.mjs`) ile tekrar başlatın.
-
-## "CLI bulunamadı"
-- İlgili CLI kurulumu/PATH ayarı eksik olabilir.
-- Terminalde `--version` komutlarını test edin.
-
-## "Unexpected token '<' ... is not valid JSON"
-- Yanlış server/endpoint dönüyor olabilir.
-- Dashboard sunucusunu yeniden başlatın.
-
-## 10. Uygulama adı
-
-- Türkçe: **Orhon'un Zotero Paneli**
-- English: **Orhon's Zotero Dashboard**
+- PDF'nin Zotero'da ekli ve indekslenmiş olduğundan emin olun.
+- Gerekirse PDF'yi Zotero içinde açıp kısa süre bekleyin.
