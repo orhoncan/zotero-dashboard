@@ -68,6 +68,7 @@ Portable sürüm kullanıyorsanız doğrudan `.exe` dosyasını açabilirsiniz.
 
 - Zotero Desktop'ın açık olduğundan emin olun.
 - Sağ üstteki kontrol panelini kontrol edin.
+- Zotero'da Gelişmiş Ayarlar sekmesinde diğer uygulamaların erişebileceğinin seçili olduğuna emin olun.
 
 **AI sağlayıcı görünmüyor**
 
