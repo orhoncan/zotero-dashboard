@@ -1,5 +1,7 @@
 # Orhon'un Zotero Paneli / Orhon's Zotero Dashboard
 
+**You won't be able to use CC after 15.06.2026 due to changes in Anthropic policies. / Anthropic'in politikalarında yapılan değişiklikler nedeniyle, 15 Haziran 2026 tarihinden sonra CC'yi kullanamazsınız.**
+
 - Türkçe rehber: [README_TR.md](README_TR.md)
 - English guide: [README_EN.md](README_EN.md)
 
